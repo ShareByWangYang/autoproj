@@ -10,6 +10,9 @@ class NumPyBackend(Backend):
     基于NumPy的纯Python实现，作为默认后端和fallback
     """
     
+    def __init__(self):
+        self.np = np
+    
     def name(self) -> str:
         return 'numpy'
     
