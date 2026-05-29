@@ -3,6 +3,7 @@ from .factory import CameraFactory
 from .projection import Projector
 from .geometry import PointCloud, Box3D
 from .backends import Backend, NumPyBackend, CUDABackend, BackendSelector
+from .config import ConfigLoader, load_camera, load_camera_from_dict, save_camera_config
 
 __version__ = '0.1.0'
 __all__ = [
@@ -17,5 +18,9 @@ __all__ = [
     'Backend',
     'NumPyBackend',
     'CUDABackend',
-    'BackendSelector'
+    'BackendSelector',
+    'ConfigLoader',
+    'load_camera',
+    'load_camera_from_dict',
+    'save_camera_config'
 ]
