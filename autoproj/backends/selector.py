@@ -1,6 +1,7 @@
 from .base import Backend
 from .numpy_backend import NumPyBackend
 from .cuda_backend import CUDABackend
+from .cpp_backend import CPythonBackend
 from typing import Optional
 
 
@@ -8,7 +9,7 @@ class BackendSelector:
     """
     后端选择器，自动检测并选择最佳可用后端
     
-    优先级：CUDA > NumPy
+    优先级：CUDA > CPython > NumPy
     
     Example:
         selector = BackendSelector()
@@ -18,6 +19,7 @@ class BackendSelector:
     
     _backends = {
         'numpy': NumPyBackend(),
+        'cpp': CPythonBackend(),
         'cuda': CUDABackend()
     }
     
@@ -32,7 +34,7 @@ class BackendSelector:
         选择后端
         
         Args:
-            backend_name: 指定后端名称，可选值: 'numpy', 'cuda'
+            backend_name: 指定后端名称，可选值: 'numpy', 'cpp', 'cuda'
                          如果为None，自动选择最佳可用后端
         
         Returns:
@@ -53,8 +55,8 @@ class BackendSelector:
             
             return backend
         
-        # 自动选择：优先CUDA，其次NumPy
-        for name in ['cuda', 'numpy']:
+        # 自动选择：优先CUDA，其次CPython，最后NumPy
+        for name in ['cuda', 'cpp', 'numpy']:
             backend = cls._backends[name]
             if backend.is_available():
                 return backend

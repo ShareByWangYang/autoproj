@@ -207,6 +207,14 @@ class PinholeCamera(Camera):
         else:
             points_cam = points_3d
         
+        if hasattr(self.backend, 'project_pinhole') and callable(getattr(self.backend, 'project_pinhole')):
+            pixels, valid = self.backend.project_pinhole(
+                points_cam, self.fx, self.fy, self.cx, self.cy,
+                self.dist_coeffs, self.width, self.height,
+                self.near_z, self.far_z
+            )
+            return pixels.astype(np.int32), valid
+        
         valid = self._check_depth_range(points_cam)
         
         x_c, y_c, z_c = points_cam[:, 0], points_cam[:, 1], points_cam[:, 2]
@@ -323,6 +331,14 @@ class KannalaBrandtCamera(Camera):
         else:
             points_cam = points_3d
         
+        if hasattr(self.backend, 'project_kannala_brandt') and callable(getattr(self.backend, 'project_kannala_brandt')):
+            pixels, valid = self.backend.project_kannala_brandt(
+                points_cam, self.fx, self.fy, self.cx, self.cy,
+                self.k1, self.k2, self.k3, self.k4,
+                self.width, self.height, self.near_z, self.far_z
+            )
+            return pixels.astype(np.int32), valid
+        
         valid = self._check_depth_range(points_cam)
         
         x_c, y_c, z_c = points_cam[:, 0], points_cam[:, 1], points_cam[:, 2]
@@ -430,6 +446,13 @@ class FThetaCamera(Camera):
             points_cam = self._transform_to_camera(points_3d, T_to_cam)
         else:
             points_cam = points_3d
+        
+        if hasattr(self.backend, 'project_ftheta') and callable(getattr(self.backend, 'project_ftheta')):
+            pixels, valid = self.backend.project_ftheta(
+                points_cam, self.fw_poly, self.cx, self.cy,
+                self.width, self.height, self.near_z, self.far_z
+            )
+            return pixels.astype(np.int32), valid
         
         valid = self._check_depth_range(points_cam)
         

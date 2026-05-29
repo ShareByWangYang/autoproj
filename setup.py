@@ -1,4 +1,23 @@
-from setuptools import setup, find_packages
+from setuptools import setup, find_packages, Extension
+from setuptools.command.build_ext import build_ext
+import sys
+
+class get_pybind_include(object):
+    def __str__(self):
+        import pybind11
+        return pybind11.get_include()
+
+ext_modules = [
+    Extension(
+        'autoproj._projection_cpp',
+        ['autoproj/_projection_cpp.cpp'],
+        include_dirs=[
+            get_pybind_include(),
+        ],
+        language='c++',
+        extra_compile_args=['-O3', '-ffast-math', '-std=c++11'],
+    ),
+]
 
 setup(
     name='autoproj',
@@ -10,9 +29,11 @@ setup(
     author_email='your.email@example.com',
     url='https://github.com/ShareByWangYang/autoproj',
     packages=find_packages(),
+    ext_modules=ext_modules,
     install_requires=[
         'numpy>=1.24',
-        'pyyaml>=6.0'
+        'pyyaml>=6.0',
+        'pybind11>=2.10'
     ],
     extras_require={
         'cuda': ['cupy>=12.0'],
@@ -30,4 +51,5 @@ setup(
         'Topic :: Scientific/Engineering :: Computer Vision',
     ],
     python_requires='>=3.8',
+    cmdclass={'build_ext': build_ext},
 )
