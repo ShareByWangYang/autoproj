@@ -16,6 +16,12 @@ class CUDABackend(Backend):
     基于CuPy的GPU加速实现，需要安装cupy包
     """
     
+    def __init__(self):
+        if CUPY_AVAILABLE:
+            self.np = cp
+        else:
+            self.np = np
+    
     def name(self) -> str:
         return 'cuda'
     
