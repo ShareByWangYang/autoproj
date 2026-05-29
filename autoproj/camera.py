@@ -2,6 +2,8 @@ import numpy as np
 from abc import ABC, abstractmethod
 from typing import Optional, Union, Tuple
 
+from .backends import BackendSelector
+
 
 class Camera(ABC):
     """
@@ -14,6 +16,7 @@ class Camera(ABC):
         cy: 主点y坐标
         near_z: 近裁剪面深度
         far_z: 远裁剪面深度
+        backend: 计算后端（NumPy/CUDA）
     """
     
     def __init__(
@@ -23,7 +26,8 @@ class Camera(ABC):
         cx: Optional[float] = None,
         cy: Optional[float] = None,
         near_z: float = 0.1,
-        far_z: float = 1000.0
+        far_z: float = 1000.0,
+        backend: Optional['Backend'] = None
     ):
         self.width = width
         self.height = height
@@ -31,6 +35,8 @@ class Camera(ABC):
         self.cy = cy if cy is not None else height / 2
         self.near_z = near_z
         self.far_z = far_z
+        self.backend = backend if backend is not None else BackendSelector.select()
+        self.np = self.backend.np
     
     @abstractmethod
     def project(
@@ -54,16 +60,19 @@ class Camera(ABC):
     
     def _transform_to_camera(self, points_3d: np.ndarray, T_to_cam: np.ndarray) -> np.ndarray:
         """将点云变换到相机坐标系"""
+        np = self.np
         points_h = np.hstack([points_3d, np.ones((len(points_3d), 1))])
         return (T_to_cam @ points_h.T).T[:, :3]
     
     def _check_depth_range(self, points_cam: np.ndarray) -> np.ndarray:
         """检查深度范围"""
+        np = self.np
         z = points_cam[:, 2]
         return (z > self.near_z) & (z < self.far_z)
     
     def _check_bounds(self, u: np.ndarray, v: np.ndarray, margin: int = 20) -> np.ndarray:
         """检查像素边界"""
+        np = self.np
         return (u >= -margin) & (u < self.width + margin) & \
                (v >= -margin) & (v < self.height + margin)
 
@@ -82,6 +91,7 @@ class PinholeCamera(Camera):
         dist_coeffs: 畸变系数 [k1, k2, p1, p2, k3, k4, k5, k6]
         near_z: 近裁剪面
         far_z: 远裁剪面
+        backend: 计算后端（可选）
     """
     
     def __init__(
@@ -94,13 +104,14 @@ class PinholeCamera(Camera):
         cy: Optional[float] = None,
         dist_coeffs: Optional[Union[list, np.ndarray]] = None,
         near_z: float = 0.1,
-        far_z: float = 1000.0
+        far_z: float = 1000.0,
+        backend: Optional['Backend'] = None
     ):
-        super().__init__(width, height, cx, cy, near_z, far_z)
+        super().__init__(width, height, cx, cy, near_z, far_z, backend)
         self.fx = fx
         self.fy = fy
         
-        # 初始化畸变系数
+        np = self.np
         if dist_coeffs is None:
             self.dist_coeffs = np.zeros(8)
         else:
@@ -148,15 +159,18 @@ class PinholeCamera(Camera):
     @property
     def fov_h(self) -> float:
         """水平视场角（度）"""
+        np = self.np
         return 2 * np.degrees(np.arctan(self.width / (2 * self.fx)))
     
     @property
     def fov_v(self) -> float:
         """垂直视场角（度）"""
+        np = self.np
         return 2 * np.degrees(np.arctan(self.height / (2 * self.fy)))
     
     def _apply_distortion(self, x_norm: np.ndarray, y_norm: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """应用畸变校正"""
+        np = self.np
         if not self.has_distortion:
             return x_norm, y_norm
         
@@ -183,9 +197,9 @@ class PinholeCamera(Camera):
         T_to_cam: Optional[np.ndarray] = None,
         pts_in_cam: bool = False
     ) -> Tuple[np.ndarray, np.ndarray]:
+        np = self.np
         points_3d = np.asarray(points_3d)
         
-        # 坐标变换
         if not pts_in_cam:
             if T_to_cam is None:
                 raise ValueError("T_to_cam must be provided when pts_in_cam is False")
@@ -193,10 +207,8 @@ class PinholeCamera(Camera):
         else:
             points_cam = points_3d
         
-        # 深度检查
         valid = self._check_depth_range(points_cam)
         
-        # 归一化
         x_c, y_c, z_c = points_cam[:, 0], points_cam[:, 1], points_cam[:, 2]
         x_norm = np.zeros_like(x_c, dtype=np.float64)
         y_norm = np.zeros_like(y_c, dtype=np.float64)
@@ -204,18 +216,14 @@ class PinholeCamera(Camera):
         x_norm[valid_z] = x_c[valid_z].astype(np.float64) / z_c[valid_z].astype(np.float64)
         y_norm[valid_z] = y_c[valid_z].astype(np.float64) / z_c[valid_z].astype(np.float64)
         
-        # 畸变校正
         x_dist, y_dist = self._apply_distortion(x_norm, y_norm)
         
-        # 内参投影
         u = self.fx * x_dist + self.cx
         v = self.fy * y_dist + self.cy
         
-        # 边界检查
         in_bounds = self._check_bounds(u, v)
         valid = valid & in_bounds
         
-        # 裁剪到图像范围
         u_clip = np.clip(u, 0, self.width - 1)
         v_clip = np.clip(v, 0, self.height - 1)
         u_clip[~valid] = -1
@@ -237,6 +245,7 @@ class KannalaBrandtCamera(Camera):
         cx: 主点x坐标
         cy: 主点y坐标
         k1, k2, k3, k4: 畸变系数（θ^3, θ^5, θ^7, θ^9系数）
+        backend: 计算后端（可选）
     """
     
     def __init__(
@@ -252,9 +261,10 @@ class KannalaBrandtCamera(Camera):
         k3: float = 0.0,
         k4: float = 0.0,
         near_z: float = 0.1,
-        far_z: float = 1000.0
+        far_z: float = 1000.0,
+        backend: Optional['Backend'] = None
     ):
-        super().__init__(width, height, cx, cy, near_z, far_z)
+        super().__init__(width, height, cx, cy, near_z, far_z, backend)
         self.fx = fx
         self.fy = fy
         self.k1 = k1
@@ -303,9 +313,9 @@ class KannalaBrandtCamera(Camera):
         T_to_cam: Optional[np.ndarray] = None,
         pts_in_cam: bool = False
     ) -> Tuple[np.ndarray, np.ndarray]:
+        np = self.np
         points_3d = np.asarray(points_3d)
         
-        # 坐标变换
         if not pts_in_cam:
             if T_to_cam is None:
                 raise ValueError("T_to_cam must be provided when pts_in_cam is False")
@@ -313,10 +323,8 @@ class KannalaBrandtCamera(Camera):
         else:
             points_cam = points_3d
         
-        # 深度检查
         valid = self._check_depth_range(points_cam)
         
-        # 归一化
         x_c, y_c, z_c = points_cam[:, 0], points_cam[:, 1], points_cam[:, 2]
         x_norm = np.zeros_like(x_c, dtype=np.float64)
         y_norm = np.zeros_like(y_c, dtype=np.float64)
@@ -324,7 +332,6 @@ class KannalaBrandtCamera(Camera):
         x_norm[valid_z] = x_c[valid_z].astype(np.float64) / z_c[valid_z].astype(np.float64)
         y_norm[valid_z] = y_c[valid_z].astype(np.float64) / z_c[valid_z].astype(np.float64)
         
-        # Kannala-Brandt畸变
         r = np.sqrt(x_norm ** 2 + y_norm ** 2)
         theta = np.arctan(r)
         
@@ -337,11 +344,9 @@ class KannalaBrandtCamera(Camera):
         x_dist = x_norm * scale
         y_dist = y_norm * scale
         
-        # 内参投影
         u = self.fx * x_dist + self.cx
         v = self.fy * y_dist + self.cy
         
-        # 边界检查
         in_bounds = self._check_bounds(u, v)
         valid = valid & in_bounds
         
@@ -364,6 +369,7 @@ class FThetaCamera(Camera):
         fw_poly: 焦距多项式系数 [a0, a1, a2, ...]
         cx: 主点x坐标
         cy: 主点y坐标
+        backend: 计算后端（可选）
     """
     
     def __init__(
@@ -374,9 +380,11 @@ class FThetaCamera(Camera):
         cx: Optional[float] = None,
         cy: Optional[float] = None,
         near_z: float = 0.1,
-        far_z: float = 1000.0
+        far_z: float = 1000.0,
+        backend: Optional['Backend'] = None
     ):
-        super().__init__(width, height, cx, cy, near_z, far_z)
+        super().__init__(width, height, cx, cy, near_z, far_z, backend)
+        np = self.np
         self.fw_poly = np.array(fw_poly, dtype=np.float64)
     
     @classmethod
@@ -413,9 +421,9 @@ class FThetaCamera(Camera):
         T_to_cam: Optional[np.ndarray] = None,
         pts_in_cam: bool = False
     ) -> Tuple[np.ndarray, np.ndarray]:
+        np = self.np
         points_3d = np.asarray(points_3d)
         
-        # 坐标变换
         if not pts_in_cam:
             if T_to_cam is None:
                 raise ValueError("T_to_cam must be provided when pts_in_cam is False")
@@ -423,24 +431,19 @@ class FThetaCamera(Camera):
         else:
             points_cam = points_3d
         
-        # 深度检查
         valid = self._check_depth_range(points_cam)
         
-        # 计算极坐标
         x_c, y_c, z_c = points_cam[:, 0], points_cam[:, 1], points_cam[:, 2]
         theta = np.arctan2(np.sqrt(x_c**2 + y_c**2), z_c)
         
-        # F-Theta多项式映射
         r = np.zeros_like(theta)
         for i, coeff in enumerate(self.fw_poly):
             r += coeff * (theta ** i)
         
-        # 转换到图像坐标
         phi = np.arctan2(y_c, x_c)
         u = r * np.cos(phi) + self.cx
         v = r * np.sin(phi) + self.cy
         
-        # 边界检查
         in_bounds = self._check_bounds(u, v)
         valid = valid & in_bounds
         
