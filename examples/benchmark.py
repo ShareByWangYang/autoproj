@@ -6,10 +6,17 @@ Comprehensive benchmark for comparing different backends and camera models.
 """
 
 import sys
+import os
 import time
 import numpy as np
 import argparse
 from typing import Dict, List, Tuple
+
+# 添加项目根目录到路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 def import_backends() -> Dict:
     """Import and return available backends."""
