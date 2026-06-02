@@ -5,7 +5,7 @@ from .geometry import PointCloud, Box3D
 from .backends import Backend, NumPyBackend, CUDABackend, CPythonBackend, BackendSelector
 from .config import ConfigLoader, load_camera, load_camera_from_dict, save_camera_config
 
-__version__ = '0.1.0'
+__version__ = '0.5.0'
 __all__ = [
     'Camera',
     'PinholeCamera',
