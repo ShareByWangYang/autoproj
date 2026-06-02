@@ -1,6 +1,10 @@
 from .base import Backend
+from .build_utils import try_build_cpp_backend
 from typing import Optional
 import numpy as np
+
+# 全局标记，避免重复构建
+_HAS_TRIED_BUILD = False
 
 try:
     from .. import _projection_cpp
@@ -14,25 +18,81 @@ class CPythonBackend(Backend):
     CPython后端实现
     
     基于C++扩展的高性能实现，提供比纯Python高10-15倍的性能
+    支持自动检测和构建 C++ 扩展
     """
     
-    def __init__(self):
-        if CPP_AVAILABLE:
-            self._cpp = _projection_cpp
+    def __init__(self, auto_build: bool = True, auto_install_deps: bool = True):
+        """
+        初始化 CPython 后端
+        
+        Args:
+            auto_build: 是否自动尝试构建 C++ 扩展
+            auto_install_deps: 是否自动安装构建依赖
+        """
+        self._auto_build = auto_build
+        self._auto_install_deps = auto_install_deps
+        self._cpp = None
+        self._available = False
+        
+        # 尝试加载或构建
+        self._load_or_build()
         self.np = np
+    
+    def _load_or_build(self) -> None:
+        """加载已有的 C++ 扩展，或尝试自动构建"""
+        global _HAS_TRIED_BUILD
+        
+        # 1. 首先尝试直接导入
+        try:
+            from .. import _projection_cpp
+            self._cpp = _projection_cpp
+            self._available = True
+            return
+        except ImportError:
+            pass
+        
+        # 2. 如果启用自动构建且尚未尝试过构建
+        if self._auto_build and not _HAS_TRIED_BUILD:
+            _HAS_TRIED_BUILD = True
+            print("检测到 C++ 后端不可用，尝试自动构建...")
+            
+            try:
+                success = try_build_cpp_backend(
+                    auto_install_deps=self._auto_install_deps
+                )
+                
+                if success:
+                    # 构建成功后重新导入
+                    from .. import _projection_cpp
+                    self._cpp = _projection_cpp
+                    self._available = True
+                    print("C++ 后端构建并加载成功！")
+                    return
+            except Exception as e:
+                print(f"自动构建过程中出错: {e}")
+        
+        # 3. 如果都失败了
+        self._available = False
     
     def name(self) -> str:
         return 'cpp'
     
     def is_available(self) -> bool:
-        if not CPP_AVAILABLE:
+        """检查后端是否可用"""
+        if not self._available or self._cpp is None:
             return False
+        
         try:
+            # 简单测试验证功能正常
             test_points = np.array([[1.0, 0.0, 10.0]], dtype=np.float64)
             test_dist = np.zeros(8, dtype=np.float64)
-            self._cpp.project_pinhole(test_points, 1000.0, 1000.0, 960.0, 540.0, test_dist, 1920, 1080, 0.1, 1000.0)
+            self._cpp.project_pinhole(
+                test_points, 1000.0, 1000.0, 960.0, 540.0, 
+                test_dist, 1920, 1080, 0.1, 1000.0
+            )
             return True
-        except Exception:
+        except Exception as e:
+            print(f"CPython 后端功能测试失败: {e}")
             return False
     
     def dot(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
