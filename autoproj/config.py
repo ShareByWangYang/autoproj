@@ -112,12 +112,15 @@ class ConfigLoader:
         }
         
         if isinstance(camera, PinholeCamera):
-            config['type'] = 'pinhole:standard'
+            # 还原原始子类型，避免 wide_angle 被错误保存为 standard
+            sub_type = camera.sub_type if camera.sub_type else 'standard'
+            config['type'] = f'pinhole:{sub_type}'
             config['fx'] = camera.fx
             config['fy'] = camera.fy
             config['dist_coeffs'] = camera.dist_coeffs.tolist()
         elif isinstance(camera, KannalaBrandtCamera):
-            config['type'] = 'fisheye:kannala'
+            sub_type = camera.sub_type if camera.sub_type else 'kannala'
+            config['type'] = f'fisheye:{sub_type}'
             config['fx'] = camera.fx
             config['fy'] = camera.fy
             config['k1'] = camera.k1
@@ -125,7 +128,8 @@ class ConfigLoader:
             config['k3'] = camera.k3
             config['k4'] = camera.k4
         elif isinstance(camera, FThetaCamera):
-            config['type'] = 'fisheye:ftheta'
+            sub_type = camera.sub_type if camera.sub_type else 'ftheta'
+            config['type'] = f'fisheye:{sub_type}'
             config['fw_poly'] = camera.fw_poly.tolist()
         
         return config

@@ -25,13 +25,10 @@ class TestBackendSelector:
     
     def test_select_cuda_unavailable(self):
         """测试选择不可用的CUDA后端"""
-        try:
-            backend = BackendSelector.select('cuda')
-            # 如果CUDA可用，验证它
-            assert isinstance(backend, CUDABackend)
-        except ValueError:
-            # CUDA不可用时应该抛出异常
-            pass
+        # CUDA不可用时应该降级到其他可用后端
+        backend = BackendSelector.select('cuda')
+        # 验证返回的后端是可用的（可能是cpp或numpy）
+        assert backend.is_available()
 
 
 class TestNumPyBackend:
@@ -76,10 +73,17 @@ class TestBackendIntegration:
         )
         
         points_3d = np.array([[1, 0, 10]], dtype=np.float64)
-        pixels, valid = camera.project(points_3d, pts_in_cam=True)
+        result, valid = camera.project(points_3d, pts_in_cam=True, preserve_extra=True)
+        
+        # 检查形状保持
+        assert result.shape == points_3d.shape
+        
+        pixels = result[:, :2]
+        depths = result[:, 2]
         
         assert valid[0]
         assert pixels[0][0] == 1060  # fx*(x/z) + cx = 1000*(1/10) + 960
+        assert depths[0] == 10  # 深度应该是z值
 
 
 if __name__ == '__main__':

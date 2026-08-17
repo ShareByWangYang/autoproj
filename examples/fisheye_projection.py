@@ -46,10 +46,12 @@ def main():
     points_3d = np.random.uniform(-20, 20, (n_points, 3))
     points_3d[:, 2] = np.random.uniform(1, 50, n_points)
     
-    result = projector.project_points(points_3d, pts_in_cam=True)
-    print(f"   总点数: {result['num_points']}")
-    print(f"   有效投影点: {result['num_valid']}")
-    print(f"   有效率: {result['num_valid']/result['num_points']*100:.1f}%")
+    result, valid = projector.project_points(points_3d, pts_in_cam=True)
+    num_valid = int(valid.sum())
+    num_points = len(valid)
+    print(f"   总点数: {num_points}")
+    print(f"   有效投影点: {num_valid}")
+    print(f"   有效率: {num_valid/num_points*100:.1f}%")
     
     print("\n=== 示例完成 ===")
 

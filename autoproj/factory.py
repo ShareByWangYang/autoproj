@@ -34,7 +34,8 @@ class CameraFactory:
     def create(
         cls,
         category: str,
-        sub_type: Optional[str] = None,** kwargs
+        sub_type: Optional[str] = None,
+        **kwargs
     ) -> Camera:
         """
         分层创建相机
@@ -69,21 +70,24 @@ class CameraFactory:
             raise ValueError(f"Unknown {category} sub-type: '{sub_type}'. Available: {available}")
         
         camera_class = config['types'][sub_type]
-        return camera_class(**kwargs)
+        camera = camera_class(**kwargs)
+        # 记录子类型，供 ConfigLoader 保存时还原类型字符串
+        camera.sub_type = sub_type
+        return camera
     
     @classmethod
     def create_from_dict(cls, config: dict) -> Camera:
         """
         从字典配置创建相机
-        
+
         Args:
             config: 相机配置字典，必须包含以下键：
                 - type: 相机类型，格式为 'category:sub_type' 或仅 'category'
                   例如: 'pinhole', 'pinhole:standard', 'fisheye:kannala', 'fisheye:ftheta'
-        
+
         Returns:
             Camera实例
-        
+
         Example:
             config = {
                 'type': 'pinhole:standard',
@@ -99,19 +103,42 @@ class CameraFactory:
         """
         if 'type' not in config:
             raise ValueError("config must contain 'type' key")
-        
+
         type_str = config['type']
         config_copy = config.copy()
         config_copy.pop('type')
-        
+
         # 解析类型字符串
         if ':' in type_str:
             category, sub_type = type_str.split(':', 1)
         else:
             category = type_str
             sub_type = None
-        
-        return cls.create(category, sub_type, **config_copy)
+
+        # 查找对应的相机类
+        category = category.lower()
+        if category not in cls._hierarchy:
+            available = ', '.join(sorted(cls._hierarchy.keys()))
+            raise ValueError(f"Unknown camera category: '{category}'. Available: {available}")
+
+        cat_config = cls._hierarchy[category]
+        if sub_type is None:
+            sub_type = cat_config['default']
+        sub_type = sub_type.lower()
+
+        if sub_type not in cat_config['types']:
+            available = ', '.join(sorted(cat_config['types'].keys()))
+            raise ValueError(f"Unknown {category} sub-type: '{sub_type}'. Available: {available}")
+
+        camera_class = cat_config['types'][sub_type]
+
+        # 优先使用相机类的 from_dict 方法（含参数验证与默认值填充）
+        if hasattr(camera_class, 'from_dict'):
+            camera = camera_class.from_dict(config_copy)
+        else:
+            camera = camera_class(**config_copy)
+        camera.sub_type = sub_type
+        return camera
     
     @classmethod
     def create_pinhole(cls, sub_type: Optional[str] = None, **kwargs) -> Camera:
@@ -133,11 +160,35 @@ class CameraFactory:
     
     @classmethod
     def list_subtypes(cls, category: str) -> List[str]:
-        """列出指定类别的所有子类型"""
+        """
+        列出指定类别的所有子类型
+
+        Args:
+            category: 类别名称
+
+        Returns:
+            子类型名称列表；若类别不存在则返回空列表
+        """
         category = category.lower()
         if category not in cls._hierarchy:
-            raise ValueError(f"Unknown category: '{category}'")
+            return []
         return list(cls._hierarchy[category]['types'].keys())
+    
+    @classmethod
+    def get_default_subtype(cls, category: str) -> Optional[str]:
+        """
+        查询指定类别的默认子类型
+
+        Args:
+            category: 类别名称
+
+        Returns:
+            默认子类型名称；若类别不存在则返回 None
+        """
+        category = category.lower()
+        if category not in cls._hierarchy:
+            return None
+        return cls._hierarchy[category]['default']
     
     @classmethod
     def register_camera_type(
