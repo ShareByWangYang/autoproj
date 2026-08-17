@@ -61,11 +61,19 @@ class TestPinholeCamera:
         
         # 相机前方10米处的点
         points_3d = np.array([[0, 0, 10]])
-        pixels, valid = camera.project(points_3d, pts_in_cam=True)
+        result, valid = camera.project(points_3d, pts_in_cam=True, preserve_extra=True)
+        
+        # 检查形状保持
+        assert result.shape == points_3d.shape
+        
+        # 提取像素坐标和深度
+        pixels = result[:, :2]
+        depths = result[:, 2]
         
         assert valid[0]
         assert pixels[0][0] == 960  # cx
         assert pixels[0][1] == 540  # cy
+        assert depths[0] == 10  # 深度应该是z值
     
     def test_project_offset(self):
         """测试偏移点投影"""
@@ -76,11 +84,18 @@ class TestPinholeCamera:
         
         # x方向偏移1米，z=10米
         points_3d = np.array([[1, 0, 10]])
-        pixels, valid = camera.project(points_3d, pts_in_cam=True)
+        result, valid = camera.project(points_3d, pts_in_cam=True, preserve_extra=True)
+        
+        # 检查形状保持
+        assert result.shape == points_3d.shape
+        
+        pixels = result[:, :2]
+        depths = result[:, 2]
         
         assert valid[0]
         expected_u = 1000 * (1/10) + 960  # fx * (x/z) + cx
         assert abs(pixels[0][0] - expected_u) < 1
+        assert depths[0] == 10  # 深度应该是z值
     
     def test_distortion(self):
         """测试畸变校正"""
@@ -91,7 +106,12 @@ class TestPinholeCamera:
         )
         
         points_3d = np.array([[5, 0, 10]], dtype=np.float64)  # 更大的偏移点
-        pixels, valid = camera.project(points_3d, pts_in_cam=True)
+        result, valid = camera.project(points_3d, pts_in_cam=True, preserve_extra=True)
+        
+        # 检查形状保持
+        assert result.shape == points_3d.shape
+        
+        pixels = result[:, :2]
         
         assert valid[0]
         # 无畸变时应为 1000*(5/10) + 960 = 1460
@@ -126,11 +146,18 @@ class TestKannalaBrandtCamera:
         )
         
         points_3d = np.array([[1, 0, 10]])
-        pixels, valid = camera.project(points_3d, pts_in_cam=True)
+        result, valid = camera.project(points_3d, pts_in_cam=True, preserve_extra=True)
+        
+        # 检查形状保持
+        assert result.shape == points_3d.shape
+        
+        pixels = result[:, :2]
+        depths = result[:, 2]
         
         assert valid[0]
         assert 0 <= pixels[0][0] < 1920
         assert 0 <= pixels[0][1] < 1080
+        assert depths[0] == 10  # 深度应该是z值
 
 
 class TestFThetaCamera:
@@ -145,9 +172,16 @@ class TestFThetaCamera:
         )
         
         points_3d = np.array([[1, 0, 10]])
-        pixels, valid = camera.project(points_3d, pts_in_cam=True)
+        result, valid = camera.project(points_3d, pts_in_cam=True, preserve_extra=True)
+        
+        # 检查形状保持
+        assert result.shape == points_3d.shape
+        
+        pixels = result[:, :2]
+        depths = result[:, 2]
         
         assert valid[0]
+        assert depths[0] == 10  # 深度应该是z值
 
 
 class TestFromDict:
@@ -234,7 +268,12 @@ class TestBoundaryCheck:
         
         # 非常远的点会超出边界
         points_3d = np.array([[100, 0, 1]])  # x=100, z=1
-        pixels, valid = camera.project(points_3d, pts_in_cam=True)
+        result, valid = camera.project(points_3d, pts_in_cam=True, preserve_extra=True)
+        
+        # 检查形状保持
+        assert result.shape == points_3d.shape
+        
+        pixels = result[:, :2]
         
         assert not valid[0]
         assert pixels[0][0] == -1  # 无效点标记为-1
@@ -247,7 +286,10 @@ class TestBoundaryCheck:
         )
         
         points_3d = np.array([[0, 0, -1]])  # z=-1
-        pixels, valid = camera.project(points_3d, pts_in_cam=True)
+        result, valid = camera.project(points_3d, pts_in_cam=True, preserve_extra=True)
+        
+        # 检查形状保持
+        assert result.shape == points_3d.shape
         
         assert not valid[0]
 
