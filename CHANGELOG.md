@@ -32,6 +32,7 @@
 ### 修复 (Fixed)
 
 - **点云投影 FOV 扩展因子未生效**：此前 `project_points` 中虽然使用了 `FrustumCuller.cull_points` 获取扩展 FOV 验证结果，但后续 `camera.project()` 内部的 `_check_fov(tolerance=0.05)` 会将扩展边界处的点过滤掉（置为 `-1`），最终 `valid & cam_valid` 使扩展因子失效。现已修复：对 culler 判定有效但相机无效的点重新计算像素坐标，并用 culler 结果作为最终有效性依据。
+- **`_project_raw_pixels` FThetaCamera 路径错误**：此前 `Projector._project_raw_pixels()` 中 FThetaCamera 分支错误地访问不存在的 `cam.coeffs` 属性，导致回退到线性近似而非使用多项式 `fw_poly`。这使得视锥裁剪后的 F-Theta 棱线端点像素坐标计算错误。现已修复为直接使用 `cam.fw_poly` 多项式和 `arctan2` 入射角公式，与 `FThetaCamera.project()` 的 NumPy 路径保持一致。
 
 ## [0.6.0] - 2026-08-10
 
