@@ -169,25 +169,14 @@ class Projector:
             v = cam.fy * y_dist + cam.cy
 
         elif cname == 'FThetaCamera':
-            # --- F-Theta fisheye ---
-            r = np.sqrt(x_norm ** 2 + y_norm ** 2)
-            theta = np.arctan(r)
-            # f_theta 映射
-            coeffs = getattr(cam, 'coeffs', None)
-            if coeffs is not None and len(coeffs) >= 2:
-                theta_d = np.zeros_like(theta)
-                for power, c in enumerate(coeffs):
-                    theta_d += c * (theta ** (power + 1))
-            else:
-                # 默认线性映射（等距投影）
-                f = getattr(cam, 'f', (cam.fx + cam.fy) * 0.5)
-                theta_d = f * theta
-            safe_r = np.maximum(r, 1e-10)
-            scale = theta_d / safe_r
-            x_dist = x_norm * scale
-            y_dist = y_norm * scale
-            u = cam.fx * x_dist + cam.cx
-            v = cam.fy * y_dist + cam.cy
+            # --- F-Theta fisheye (polynomial: r = sum(coeff[i] * theta^i)) ---
+            theta = np.arctan2(np.sqrt(pts[:, 0]**2 + pts[:, 1]**2), safe_z)
+            r_dist = np.zeros_like(theta)
+            for i, coeff in enumerate(cam.fw_poly):
+                r_dist += coeff * (theta ** i)
+            phi = np.arctan2(pts[:, 1], pts[:, 0])
+            u = r_dist * np.cos(phi) + cam.cx
+            v = r_dist * np.sin(phi) + cam.cy
 
         else:
             # Fallback: 针孔模型无畸变
