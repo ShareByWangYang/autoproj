@@ -3,7 +3,14 @@
 #include <cmath>
 #include <algorithm>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace py = pybind11;
+
+// OpenMP 并行阈值：仅当点数超过此值时启用多线程，避免小数据集的线程创建开销
+#define OMP_THRESHOLD 1000000
 
 void project_pinhole(
     const double* points_3d,
@@ -17,6 +24,7 @@ void project_pinhole(
     int width, int height,
     double near_z, double far_z
 ) {
+    #pragma omp parallel for schedule(static) if(n_points > OMP_THRESHOLD)
     for (int i = 0; i < n_points; ++i) {
         double x_c = points_3d[i * 3];
         double y_c = points_3d[i * 3 + 1];
@@ -58,6 +66,7 @@ void project_pinhole(
             pixels[i * 2 + 1] = -1;
             valid[i] = false;
         } else {
+            // 恢复 clamp 行为，与纯 Python 路径保持一致
             u = std::max(0.0, std::min((double)(width - 1), u));
             v = std::max(0.0, std::min((double)(height - 1), v));
             pixels[i * 2] = u;
@@ -78,6 +87,7 @@ void project_kannala_brandt(
     int width, int height,
     double near_z, double far_z
 ) {
+    #pragma omp parallel for schedule(static) if(n_points > OMP_THRESHOLD)
     for (int i = 0; i < n_points; ++i) {
         double x_c = points_3d[i * 3];
         double y_c = points_3d[i * 3 + 1];
@@ -96,13 +106,10 @@ void project_kannala_brandt(
         double r = std::sqrt(x_norm * x_norm + y_norm * y_norm);
         double theta = std::atan(r);
         
-        double theta_d = theta + k1 * theta * theta * theta +
-                         k2 * theta * theta * theta * theta * theta +
-                         k3 * theta * theta * theta * theta * theta * theta * theta +
-                         k4 * theta * theta * theta * theta * theta * theta * theta * theta * theta;
+        double theta_d = theta + k1 * std::pow(theta, 3) + k2 * std::pow(theta, 5) + 
+                         k3 * std::pow(theta, 7) + k4 * std::pow(theta, 9);
         
-        double safe_r = std::max(r, 1e-10);
-        double scale = theta_d / safe_r;
+        double scale = theta_d / std::max(r, 1e-10);
         
         double x_dist = x_norm * scale;
         double y_dist = y_norm * scale;
@@ -118,6 +125,7 @@ void project_kannala_brandt(
             pixels[i * 2 + 1] = -1;
             valid[i] = false;
         } else {
+            // 恢复 clamp 行为，与纯 Python 路径保持一致
             u = std::max(0.0, std::min((double)(width - 1), u));
             v = std::max(0.0, std::min((double)(height - 1), v));
             pixels[i * 2] = u;
@@ -138,6 +146,7 @@ void project_ftheta(
     int width, int height,
     double near_z, double far_z
 ) {
+    #pragma omp parallel for schedule(static) if(n_points > OMP_THRESHOLD)
     for (int i = 0; i < n_points; ++i) {
         double x_c = points_3d[i * 3];
         double y_c = points_3d[i * 3 + 1];
@@ -172,6 +181,7 @@ void project_ftheta(
             pixels[i * 2 + 1] = -1;
             valid[i] = false;
         } else {
+            // 恢复 clamp 行为，与纯 Python 路径保持一致
             u = std::max(0.0, std::min((double)(width - 1), u));
             v = std::max(0.0, std::min((double)(height - 1), v));
             pixels[i * 2] = u;
@@ -189,35 +199,28 @@ py::tuple py_project_pinhole(
     int width, int height,
     double near_z, double far_z
 ) {
-    py::buffer_info points_info = points_3d.request();
-    py::buffer_info dist_info = dist_coeffs.request();
-    
-    double* points_ptr = static_cast<double*>(points_info.ptr);
-    double* dist_ptr = static_cast<double*>(dist_info.ptr);
-    
-    int n_points = points_info.shape[0];
+    py::buffer_info buf = points_3d.request();
+    int n_points = buf.shape[0];
     
     py::array_t<double> pixels({n_points, 2});
-    py::array_t<bool> valid({n_points});
+    py::array_t<bool> valid(n_points);
     
-    py::buffer_info pixels_info = pixels.request();
-    py::buffer_info valid_info = valid.request();
+    py::buffer_info dist_buf = dist_coeffs.request();
+    int dist_size = dist_buf.shape[0];
+    double* dist_ptr = (double*)dist_buf.ptr;
     
-    double* pixels_ptr = static_cast<double*>(pixels_info.ptr);
-    bool* valid_ptr = static_cast<bool*>(valid_info.ptr);
-    
-    double k1 = 0, k2 = 0, p1 = 0, p2 = 0, k3 = 0, k4 = 0, k5 = 0, k6 = 0;
-    if (dist_info.shape[0] >= 4) {
-        k1 = dist_ptr[0]; k2 = dist_ptr[1]; p1 = dist_ptr[2]; p2 = dist_ptr[3];
-    }
-    if (dist_info.shape[0] >= 8) {
-        k3 = dist_ptr[4]; k4 = dist_ptr[5]; k5 = dist_ptr[6]; k6 = dist_ptr[7];
-    }
+    double k1 = dist_size > 0 ? dist_ptr[0] : 0.0;
+    double k2 = dist_size > 1 ? dist_ptr[1] : 0.0;
+    double p1 = dist_size > 2 ? dist_ptr[2] : 0.0;
+    double p2 = dist_size > 3 ? dist_ptr[3] : 0.0;
+    double k3 = dist_size > 4 ? dist_ptr[4] : 0.0;
+    double k4 = dist_size > 5 ? dist_ptr[5] : 0.0;
+    double k5 = dist_size > 6 ? dist_ptr[6] : 0.0;
+    double k6 = dist_size > 7 ? dist_ptr[7] : 0.0;
     
     project_pinhole(
-        points_ptr, pixels_ptr, valid_ptr, n_points,
-        fx, fy, cx, cy,
-        k1, k2, p1, p2, k3, k4, k5, k6,
+        (double*)buf.ptr, (double*)pixels.request().ptr, (bool*)valid.request().ptr,
+        n_points, fx, fy, cx, cy, k1, k2, p1, p2, k3, k4, k5, k6,
         width, height, near_z, far_z
     );
     
@@ -232,22 +235,15 @@ py::tuple py_project_kannala_brandt(
     int width, int height,
     double near_z, double far_z
 ) {
-    py::buffer_info points_info = points_3d.request();
-    double* points_ptr = static_cast<double*>(points_info.ptr);
-    int n_points = points_info.shape[0];
+    py::buffer_info buf = points_3d.request();
+    int n_points = buf.shape[0];
     
     py::array_t<double> pixels({n_points, 2});
-    py::array_t<bool> valid({n_points});
-    
-    py::buffer_info pixels_info = pixels.request();
-    py::buffer_info valid_info = valid.request();
-    
-    double* pixels_ptr = static_cast<double*>(pixels_info.ptr);
-    bool* valid_ptr = static_cast<bool*>(valid_info.ptr);
+    py::array_t<bool> valid(n_points);
     
     project_kannala_brandt(
-        points_ptr, pixels_ptr, valid_ptr, n_points,
-        fx, fy, cx, cy, k1, k2, k3, k4,
+        (double*)buf.ptr, (double*)pixels.request().ptr, (bool*)valid.request().ptr,
+        n_points, fx, fy, cx, cy, k1, k2, k3, k4,
         width, height, near_z, far_z
     );
     
@@ -261,55 +257,29 @@ py::tuple py_project_ftheta(
     int width, int height,
     double near_z, double far_z
 ) {
-    py::buffer_info points_info = points_3d.request();
-    py::buffer_info poly_info = fw_poly.request();
-    
-    double* points_ptr = static_cast<double*>(points_info.ptr);
-    double* poly_ptr = static_cast<double*>(poly_info.ptr);
-    
-    int n_points = points_info.shape[0];
-    int poly_size = poly_info.shape[0];
+    py::buffer_info buf = points_3d.request();
+    int n_points = buf.shape[0];
     
     py::array_t<double> pixels({n_points, 2});
-    py::array_t<bool> valid({n_points});
+    py::array_t<bool> valid(n_points);
     
-    py::buffer_info pixels_info = pixels.request();
-    py::buffer_info valid_info = valid.request();
-    
-    double* pixels_ptr = static_cast<double*>(pixels_info.ptr);
-    bool* valid_ptr = static_cast<bool*>(valid_info.ptr);
+    py::buffer_info poly_buf = fw_poly.request();
+    int poly_size = poly_buf.shape[0];
     
     project_ftheta(
-        points_ptr, pixels_ptr, valid_ptr, n_points,
-        poly_ptr, poly_size, cx, cy,
-        width, height, near_z, far_z
+        (double*)buf.ptr, (double*)pixels.request().ptr, (bool*)valid.request().ptr,
+        n_points, (double*)poly_buf.ptr, poly_size,
+        cx, cy, width, height, near_z, far_z
     );
     
     return py::make_tuple(pixels, valid);
 }
 
 PYBIND11_MODULE(_projection_cpp, m) {
-    m.doc() = "C++ extension for high-performance 3D-to-2D projection";
-    
     m.def("project_pinhole", &py_project_pinhole,
-          "Project 3D points using pinhole camera model",
-          py::arg("points_3d"), py::arg("fx"), py::arg("fy"),
-          py::arg("cx"), py::arg("cy"), py::arg("dist_coeffs"),
-          py::arg("width"), py::arg("height"),
-          py::arg("near_z"), py::arg("far_z"));
-    
+          "Project 3D points to 2D using pinhole camera model");
     m.def("project_kannala_brandt", &py_project_kannala_brandt,
-          "Project 3D points using Kannala-Brandt fisheye model",
-          py::arg("points_3d"), py::arg("fx"), py::arg("fy"),
-          py::arg("cx"), py::arg("cy"),
-          py::arg("k1"), py::arg("k2"), py::arg("k3"), py::arg("k4"),
-          py::arg("width"), py::arg("height"),
-          py::arg("near_z"), py::arg("far_z"));
-    
+          "Project 3D points to 2D using Kannala-Brandt fisheye model");
     m.def("project_ftheta", &py_project_ftheta,
-          "Project 3D points using F-Theta fisheye model",
-          py::arg("points_3d"), py::arg("fw_poly"),
-          py::arg("cx"), py::arg("cy"),
-          py::arg("width"), py::arg("height"),
-          py::arg("near_z"), py::arg("far_z"));
+          "Project 3D points to 2D using F-Theta fisheye model");
 }

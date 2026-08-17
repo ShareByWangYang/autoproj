@@ -167,8 +167,8 @@ class CPythonBackend(Backend):
         if not self.is_available():
             raise RuntimeError("CPython backend is not available")
         
-        points_3d = np.asarray(points_3d, dtype=np.float64)
-        dist_coeffs = np.asarray(dist_coeffs, dtype=np.float64)
+        points_3d = np.ascontiguousarray(points_3d, dtype=np.float64)
+        dist_coeffs = np.ascontiguousarray(dist_coeffs, dtype=np.float64)
         
         pixels, valid = self._cpp.project_pinhole(
             points_3d, fx, fy, cx, cy, dist_coeffs,
@@ -203,7 +203,7 @@ class CPythonBackend(Backend):
         if not self.is_available():
             raise RuntimeError("CPython backend is not available")
         
-        points_3d = np.asarray(points_3d, dtype=np.float64)
+        points_3d = np.ascontiguousarray(points_3d, dtype=np.float64)
         
         pixels, valid = self._cpp.project_kannala_brandt(
             points_3d, fx, fy, cx, cy, k1, k2, k3, k4,
@@ -236,8 +236,8 @@ class CPythonBackend(Backend):
         if not self.is_available():
             raise RuntimeError("CPython backend is not available")
         
-        points_3d = np.asarray(points_3d, dtype=np.float64)
-        fw_poly = np.asarray(fw_poly, dtype=np.float64)
+        points_3d = np.ascontiguousarray(points_3d, dtype=np.float64)
+        fw_poly = np.ascontiguousarray(fw_poly, dtype=np.float64)
         
         pixels, valid = self._cpp.project_ftheta(
             points_3d, fw_poly, cx, cy,
