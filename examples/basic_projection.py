@@ -39,18 +39,20 @@ def main():
     
     # 投影点云
     print("4. 执行投影")
-    result = projector.project_points(points_3d, pts_in_cam=True)
-    print(f"   总点数: {result['num_points']}")
-    print(f"   有效投影点: {result['num_valid']}")
-    print(f"   有效率: {result['num_valid']/result['num_points']*100:.1f}%\n")
+    result, valid = projector.project_points(points_3d, pts_in_cam=True)
+    num_valid = int(valid.sum())
+    num_points = len(valid)
+    print(f"   总点数: {num_points}")
+    print(f"   有效投影点: {num_valid}")
+    print(f"   有效率: {num_valid/num_points*100:.1f}%\n")
     
     # 显示部分结果
     print("5. 投影结果示例")
-    valid_indices = np.where(result['valid'])[0][:5]
+    valid_indices = np.where(valid)[0][:5]
     for i in valid_indices:
-        pixel = result['pixels'][i]
+        pixel = result[i]
         point = points_3d[i]
-        print(f"   点 ({point[0]:.2f}, {point[1]:.2f}, {point[2]:.2f}) -> 像素 ({pixel[0]}, {pixel[1]})")
+        print(f"   点 ({point[0]:.2f}, {point[1]:.2f}, {point[2]:.2f}) -> 像素 ({pixel[0]:.1f}, {pixel[1]:.1f})")
     
     print("\n=== 示例完成 ===")
 
