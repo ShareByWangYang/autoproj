@@ -1,4 +1,4 @@
-from setuptools import setup, Extension, find_packages
+from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 import os
 import sys
@@ -121,52 +121,6 @@ else:
     cmdclass = {}
 
 setup(
-    name="autoproj",
-    version="0.5.0",
-    author="AutoProj Development Team",
-    description="High-precision 3D-to-2D projection engine",
-    long_description=open("README.md").read(),
-    long_description_content_type="text/markdown",
-    packages=find_packages(),
     ext_modules=ext_modules,
     cmdclass=cmdclass,
-    install_requires=[
-        "numpy>=1.20.0",
-        "pyyaml>=6.0",
-    ],
-    extras_require={
-        "cuda": ["cupy>=12.0.0"],
-        "dev": [
-            "pytest>=7.0.0",
-            "pytest-cov>=4.0.0",
-            "pybind11>=2.10.0",
-        ],
-        "docs": [
-            "sphinx>=5.0.0",
-            "sphinx-rtd-theme>=1.0.0",
-        ],
-    },
-    python_requires=">=3.8",
-    classifiers=[
-        "Development Status :: 4 - Beta",
-        "Intended Audience :: Developers",
-        "Intended Audience :: Science/Research",
-        "License :: OSI Approved :: MIT License",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: C++",
-        "Topic :: Scientific/Engineering :: Image Processing",
-        "Topic :: Scientific/Engineering :: Visualization",
-    ],
-    keywords="projection camera 3d 2d robotics computer-vision",
-    license="MIT",
-    url="https://github.com/autoproj/autoproj",
-    project_urls={
-        "Documentation": "https://autoproj.readthedocs.io/",
-        "Bug Reports": "https://github.com/autoproj/autoproj/issues",
-        "Source": "https://github.com/autoproj/autoproj",
-    },
 )

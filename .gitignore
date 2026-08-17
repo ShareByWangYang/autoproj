@@ -16,6 +16,14 @@ dist/
 *.egg-info/
 *.egg
 
+# Compiled C++ extensions (built by setup.py / auto-builder)
+*.so
+*.o
+*.obj
+
+# Temporary build files
+tmp/
+
 # Testing
 .coverage
 htmlcov/
@@ -33,3 +41,8 @@ Thumbs.db
 
 # Logs
 *.log
+# Debug visualization images
+examples/*.png
+
+# Debug documents
+debug-fov-expansion.md
