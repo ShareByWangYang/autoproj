@@ -6,8 +6,16 @@ import numpy as np
 class Backend(ABC):
     """
     后端抽象基类，定义统一的计算接口
-    
-    所有后端实现必须继承此类并实现所有抽象方法
+
+    所有后端实现必须继承此类并实现所有抽象方法。
+
+    设计说明：
+    - dot/matmul 等基础算子作为统一接口保留，即使当前相机投影逻辑
+      未直接调用 dot（相机变换已改用 matmul），也保持接口完整性，
+      供第三方扩展和未来功能使用。
+    - 投影专用方法（project_pinhole/project_kannala_brandt/project_ftheta）
+      为可选实现：NumPyBackend 不实现（纯 Python 路径作为 fallback），
+      CPythonBackend 和 CUDABackend 实现以提供高性能加速。
     """
     
     @abstractmethod

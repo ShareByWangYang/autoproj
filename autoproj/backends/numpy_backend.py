@@ -6,8 +6,13 @@ from typing import Optional
 class NumPyBackend(Backend):
     """
     NumPy后端实现
-    
-    基于NumPy的纯Python实现，作为默认后端和fallback
+
+    基于NumPy的纯Python实现，作为默认后端和fallback。
+
+    设计说明：本后端不实现 project_pinhole/project_kannala_brandt/project_ftheta
+    投影专用方法。相机 project() 通过 hasattr 检测后，会走纯 Python 路径
+    （即 Camera.project 中的 NumPy 向量化实现），这本身就是 fallback 路径，
+    无需额外的投影方法封装。
     """
     
     def __init__(self):

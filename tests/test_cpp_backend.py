@@ -112,10 +112,11 @@ class TestCPythonBackendConsistency:
         
         pixels_cpp, valid_cpp = camera_cpp.project(points_3d, pts_in_cam=True)
         pixels_numpy, valid_numpy = camera_numpy.project(points_3d, pts_in_cam=True)
-        
+
         np.testing.assert_array_equal(valid_cpp, valid_numpy)
-        np.testing.assert_array_equal(pixels_cpp, pixels_numpy)
-    
+        # 使用 assert_allclose 容忍浮点运算顺序导致的精度差异（1e-13级别）
+        np.testing.assert_allclose(pixels_cpp, pixels_numpy, rtol=1e-9, atol=1e-9)
+
     def test_kannala_consistency(self):
         """测试Kannala-Brandt相机两种后端结果一致"""
         cpp_backend = CPythonBackend()
@@ -141,10 +142,10 @@ class TestCPythonBackendConsistency:
         
         pixels_cpp, valid_cpp = camera_cpp.project(points_3d, pts_in_cam=True)
         pixels_numpy, valid_numpy = camera_numpy.project(points_3d, pts_in_cam=True)
-        
+
         np.testing.assert_array_equal(valid_cpp, valid_numpy)
-        np.testing.assert_array_equal(pixels_cpp, pixels_numpy)
-    
+        np.testing.assert_allclose(pixels_cpp, pixels_numpy, rtol=1e-9, atol=1e-9)
+
     def test_ftheta_consistency(self):
         """测试F-Theta相机两种后端结果一致"""
         cpp_backend = CPythonBackend()
@@ -170,9 +171,9 @@ class TestCPythonBackendConsistency:
         
         pixels_cpp, valid_cpp = camera_cpp.project(points_3d, pts_in_cam=True)
         pixels_numpy, valid_numpy = camera_numpy.project(points_3d, pts_in_cam=True)
-        
+
         np.testing.assert_array_equal(valid_cpp, valid_numpy)
-        np.testing.assert_array_equal(pixels_cpp, pixels_numpy)
+        np.testing.assert_allclose(pixels_cpp, pixels_numpy, rtol=1e-9, atol=1e-9)
 
 
 class TestCPythonBackendPerformance:
