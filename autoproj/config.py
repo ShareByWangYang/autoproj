@@ -1,5 +1,6 @@
 import yaml
 import json
+import numpy as np
 from typing import Optional, Dict, Any, Union
 import os
 
@@ -108,9 +109,13 @@ class ConfigLoader:
             'cx': camera.cx,
             'cy': camera.cy,
             'near_z': camera.near_z,
-            'far_z': camera.far_z
+            'far_z': camera.far_z,
+            'boundary_ratio': camera.boundary_ratio
         }
-        
+        # 保存 FOV 上限（度数），仅在用户显式指定时
+        if getattr(camera, '_max_fov_rad', None) is not None:
+            config['max_fov_deg'] = float(np.degrees(camera._max_fov_rad))
+
         if isinstance(camera, PinholeCamera):
             # 还原原始子类型，避免 wide_angle 被错误保存为 standard
             sub_type = camera.sub_type if camera.sub_type else 'standard'

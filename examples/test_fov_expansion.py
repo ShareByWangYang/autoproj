@@ -99,7 +99,7 @@ def test_pinhole_auto_expansion():
     )
 
     # auto 模式
-    projector = Projector(camera, cull_frustum=True, frustum_expansion='auto')
+    projector = Projector(camera, cull_frustum=True, frustum_scale='auto')
     expected_expansion = camera.compute_expansion_factor()
 
     print(f"  Camera computed expansion: {expected_expansion:.6f}")
@@ -154,7 +154,7 @@ def test_pinhole_point_projection_with_auto():
         [x_at_real_fov * 1.01, 0, z],  # 真实 FOV 外
     ])
 
-    projector = Projector(camera, cull_frustum=True, frustum_expansion='auto')
+    projector = Projector(camera, cull_frustum=True, frustum_scale='auto')
 
     result, valid = projector.project_points(test_points, pts_in_cam=True)
 
@@ -250,11 +250,11 @@ def test_comparison_manual_vs_auto():
     ])
 
     # 手动 1.05
-    proj_manual = Projector(camera, cull_frustum=True, frustum_expansion=manual_expansion)
+    proj_manual = Projector(camera, cull_frustum=True, frustum_scale=manual_expansion)
     _, valid_manual = proj_manual.project_points(points, pts_in_cam=True)
 
     # auto
-    proj_auto = Projector(camera, cull_frustum=True, frustum_expansion='auto')
+    proj_auto = Projector(camera, cull_frustum=True, frustum_scale='auto')
     _, valid_auto = proj_auto.project_points(points, pts_in_cam=True)
 
     print(f"\n  Point comparison at z={z}m:")

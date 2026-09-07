@@ -15,21 +15,74 @@
   - ✅ F-Theta fisheye camera
 - **High-precision projection**: Sub-pixel accuracy for critical perception tasks
 - **Hierarchical naming API**: Intuitive camera category organization (`pinhole`, `fisheye:kannala`, `fisheye:ftheta`)
-- **Multi-backend support**: NumPy (CPU), C++ (CPU, via pybind11 + OpenMP), and CUDA (GPU, via CuPy) with automatic fallback
-- **Full GPU acceleration**: CUDA backend now implements all three projection methods (pinhole/Kannala-Brandt/F-Theta) for true GPU speedup
+- **Numba JIT acceleration**: Batch operations (`project_boxes` / `project_lines` / `project_polygons`) use Numba `@njit(parallel=True)` for 4-15x speedup over Python loops
 - **Flexible configuration**: Load camera parameters from YAML/JSON files with round-trip type preservation
-- **Frustum expansion**: Adjustable boundary margin via `Projector(frustum_expansion=...)` for customizable view frustum culling
-  - `frustum_expansion='auto'`: Automatically computes expansion factor from distortion coefficients via `camera.compute_expansion_factor()`
-  - `frustum_expansion=1.5`: Manual expansion factor (1.0 = no expansion)
+- **Frustum scaling**: Adjustable boundary margin via `Projector(frustum_scale=...)` for customizable view frustum culling
+  - `frustum_scale=None`: Automatically computes expansion factor from distortion coefficients via `camera.compute_expansion_factor()`
+  - `frustum_scale=1.5`: Manual scaling factor (1.0 = no scaling)
+- **FOV upper limit**: `max_fov_deg` parameter (degrees) to cap fisheye camera FOV, preventing extreme-angle projection artifacts (`None` = no limit)
+- **Soft clipping**: `soft_clip_ratio` parameter retains slightly out-of-bounds corners when their 2D projection is close to the clipped point (pinhole cameras only)
 - **Frustum culling**: `FrustumCuller` performs geometric FOV filtering before distortion, preventing OpenCV distortion "fold-back" artifacts
   - Liang-Barsky algorithm for pyramid frustum (pinhole cameras)
   - Quadratic equation solver for cone frustum (fisheye cameras)
   - Sutherland-Hodgman algorithm for polygon clipping
   - Edge-level clipping for 3D bounding boxes (12 edges clipped individually)
 - **PointCloud integration**: `Projector.project_point_cloud()` directly accepts `PointCloud` objects with automatic filtering
-- **Automatic C++ backend**: Auto-detect compiler, install pybind11, compile on-demand with graceful fallback
-- **OpenMP parallelism**: C++ extension uses `#pragma omp parallel for` for multi-core projection of large point clouds (enabled when n_points > 1M)
-- **Python-only implementation**: No external dependencies required for core functionality
+- **Python-only implementation**: Pure Python + NumPy + Numba, no compiler toolchain required
+
+## Coordinate System Conventions
+
+AutoProj 内部统一采用 **OpenCV 约定**，不做任何坐标系自动猜测/翻轴。
+调用方若数据源约定不同，须在入口处通过 [`conventions`](#conventions) 模块完成显式变换后再传入。
+
+| 项目 | 约定 | 备注 |
+|------|------|------|
+| 相机系 | **OpenCV**: x 右 / y 下 / z 前，原点为光心 | 前方点 z>0；针孔视锥为棱锥，鱼眼为圆锥 |
+| 像素原点 | **左上角**，u 向右增长，v 向下增长 | 与 OpenCV `cv2.projectPoints` 一致 |
+| 外参 `T_to_cam` | **world→camera** 的 4×4 齐次矩阵，`p_cam = T @ p_world` | 若手头是 c2w（SLAM/渲染域常见），先 `conventions.invert_transform(T_c2w)` |
+| 单位 | **米**（`near_z`/`far_z` 默认 0.1/1000 米） | 毫米数据须先乘 1e-3，否则全部超 `far_z` 被判 invalid |
+| 畸变系数 | **不可跨模型混用** | 针孔 k1-k6/p1-p2 与鱼眼 k1-k4 物理含义完全不同；`cv2.fisheye` 的 k1-k4 可原样填入 `fisheye:kannala` |
+
+### 常见数据源的对齐方式
+
+| 数据源约定 | 与 OpenCV 的差异 | 对齐方式 |
+|------------|------------------|----------|
+| OpenGL / Blender | y 上、z 后 | 轴变换 `diag(1, -1, -1)`；或 `conventions.AXIS_OPENGL_TO_OPENCV` |
+| ROS REP-103 (LiDAR/车体) | x 前、y 左、z 上 | 需按实际传感器 extrinsic 构造，调用方负责 |
+| 四元数 `xyzw` (ROS/eigen) | 本库 `build_transform` 默认 `wxyz` | 传 `quat_order='xyzw'` |
+
+> **静默错误警告**：外参方向弄反、轴向错配、四元数顺序错、单位毫米、模型族错配
+> **都不会报错**，只会产生旋转/镜像/全 invalid 等症状。建议开启投影健康检查
+> (`Projector(..., health_check=True)`) 辅助定位。
+
+## Conventions
+
+`autoproj.conventions` 提供入口适配工具（纯函数，不改动核心数学）：
+
+```python
+from autoproj import conventions
+
+# 1. 由四元数 + 平移构造 w2c 外参
+T_w2c = conventions.build_transform(
+    quat=[0.99, 0, 0, 0.14],   # wxyz 默认；ROS 用 quat_order='xyzw'
+    t=[1.0, 0.0, 1.5],          # 相机在源系的位置（w2c 下即 t_w2c）
+    direction='w2c'             # 显式声明方向
+)
+
+# 2. c2w ↔ w2c 互转
+T_c2w = conventions.invert_transform(T_w2c)
+T_w2c = conventions.invert_transform(T_c2w)  # SLAM 给的 c2w 直接转
+
+# 3. 常见轴变换矩阵（右乘到外参 R）
+T_gl = conventions.AXIS_OPENGL_TO_OPENCV   # diag(1,-1,-1) 的 4x4
+# T_w2c_opencv = T_gl @ T_w2c_opengl_axis
+
+# 4. 标定分辨率与使用分辨率不一致时缩放内参
+fx2, fy2, cx2, cy2 = conventions.scale_intrinsics(
+    fx=1000, fy=1000, cx=960, cy=540,
+    src_size=(1920, 1080), dst_size=(960, 540)
+)
+```
 
 ## Installation
 
@@ -37,11 +90,11 @@
 # Basic installation
 pip install autoproj
 
-# With CUDA support (optional, requires CuPy)
-pip install autoproj[cuda]
+# With Numba JIT acceleration (recommended for batch operations)
+pip install autoproj[jit]
 
 # Development installation
-pip install autoproj[cuda,dev]
+pip install autoproj[dev]
 ```
 
 ## Quick Start
@@ -59,9 +112,10 @@ camera = CameraFactory.create_pinhole(
     dist_coeffs=[0.1, -0.05, 0.01, -0.01]
 )
 
-# Create a projector with frustum expansion (optional)
-# frustum_expansion=2.0 doubles the boundary margin from 20px to 40px
-projector = Projector(camera, frustum_expansion=1.0)
+# Create a projector with frustum scaling (optional)
+# frustum_scale=None: auto-compute expansion from distortion coefficients
+# frustum_scale=1.0: no scaling (uses boundary_ratio for margin)
+projector = Projector(camera, frustum_scale=1.0)
 
 # Generate test points (in camera coordinate system)
 points_3d = np.array([[1, 0, 10], [0, 0, 10], [-1, 0, 10]])
@@ -129,7 +183,8 @@ camera = CameraFactory.create_pinhole(
     fx=1000, fy=1000, cx=960, cy=540,
     dist_coeffs=[k1, k2, p1, p2, k3, k4, k5, k6],  # 8 parameters
     near_z=0.1,
-    far_z=1000.0
+    far_z=1000.0,
+    boundary_ratio=0.02  # boundary margin as ratio of max(width, height)
 )
 ```
 
@@ -140,7 +195,8 @@ camera = CameraFactory.create_fisheye(
     sub_type='kannala',  # default
     width=1920, height=1080,
     fx=500, fy=500, cx=960, cy=540,
-    k1=0.1, k2=0.05, k3=0.01, k4=0.005
+    k1=0.1, k2=0.05, k3=0.01, k4=0.005,
+    max_fov_deg=180  # cap FOV at 180° to avoid extreme-angle artifacts (None = no limit)
 )
 ```
 
@@ -151,7 +207,8 @@ camera = CameraFactory.create_fisheye(
     sub_type='ftheta',
     width=1920, height=1080,
     fw_poly=[0, 500, 50],  # Focal length polynomial: fw(theta) = a0 + a1*theta + a2*theta^2 + ...
-    cx=960, cy=540
+    cx=960, cy=540,
+    max_fov_deg=170  # cap FOV at 170° (None = no limit)
 )
 ```
 
@@ -168,9 +225,6 @@ python examples/fisheye_projection.py
 
 # Configuration file loader
 python examples/config_loader.py
-
-# C++ backend auto-build demonstration
-python examples/auto_build_example.py
 ```
 
 ## Configuration File Format
@@ -233,11 +287,19 @@ far_z: 1000.0
 
 | Method | Description |
 |--------|-------------|
-| `project_points(points_3d, T_to_cam=None, pts_in_cam=False)` | Project 3D points to 2D image plane. Returns `(result, valid)` tuple where `result` has shape `(N, 3+)` (columns: `u`, `v`, `depth`, plus any extra input columns preserved) and `valid` is a boolean mask of shape `(N,)`. |
-| `project_box(box_3d, T_to_cam=None)` | Project a single 3D bounding box (8 corners). Returns `(result, valid)`. |
-| `project_lines(lines, T_to_cam=None)` | Project 3D line segments. Returns `(result, valid)` where a line is valid only if both endpoints are valid. |
+| `project_points(points_3d, T_to_cam=None, pts_in_cam=False, preserve_extra=False)` | Project 3D points to 2D image plane. Returns `(result, valid)`. Default (`preserve_extra=False`): `result` is `(N, 2)` int32 (columns: `u`, `v`, invalid points set to `-1`, valid clamped to `[0, w-1]`). With `preserve_extra=True`: `result` is `(N, 3+)` float64 (`u`, `v`, `depth`, plus extra input columns). `valid` is a boolean mask of shape `(N,)`. |
+| `project_box(box_input, T_to_cam=None, pts_in_cam=False, cull_frustum=None, extend_to_boundary=False)` | Project a single 3D bounding box (8 corners). Returns a dict with corner projections, visible edges, and clipping info. |
+| `project_boxes(boxes, T_to_cam=None, pts_in_cam=False, cull_frustum=None, extend_to_boundary=False)` | Batch project 3D bounding boxes. Returns `List[Dict]` (same format as `project_box`). Uses Numba JIT for batches > 64. |
+| `project_lines(lines_input, T_to_cam=None, pts_in_cam=False, cull_frustum=None)` | Project 3D line segments. Returns `List[Optional[(p1, p2)]]` of visible segments (None if fully clipped). Supports `(N,2,3)` ndarray, `LineSet`, or list of tuples. |
+| `project_polygon(polygon, T_to_cam=None, pts_in_cam=False, cull_frustum=None)` | Project a single 3D polygon. Returns a dict with vertex projections and clipped polygon vertices. |
+| `project_polygons(polygons, T_to_cam=None, pts_in_cam=False, cull_frustum=None)` | Batch project 3D polygons. Returns `List[Dict]`. Uses Numba JIT for batches > 32. |
 | `project_point_cloud(cloud, T_to_cam=None, pts_in_cam=False)` | Project a `PointCloud` object. Returns `(result, valid, filtered_cloud)` where `filtered_cloud` is the input cloud filtered by the valid mask. |
-| `set_frustum_expansion(expansion)` | Dynamically update the frustum expansion coefficient. The effective boundary margin is `20 * expansion` pixels. |
+| `extend_edges_to_boundary(...)` | Extend clipped box edges to image boundary for 2D visual optimization. |
+| `set_frustum_scale(scale)` | Dynamically update the frustum scaling factor. `None` = auto-compute, `float` = manual scale. |
+| `set_frustum_expansion(expansion)` | [DEPRECATED] Use `set_frustum_scale` instead. Accepts `'auto'` or float for backward compatibility. |
+| `set_cull_frustum(enabled)` | Dynamically enable/disable frustum culling at runtime. |
+
+**Constructor parameters**: `Projector(camera, cull_frustum=True, frustum_scale=None, corner_match_tolerance=3.0, soft_clip_ratio=None, health_check=False)`. Set `health_check=True` to enable projection sanity diagnostics (warns on low valid ratio, z<0 majority, det(R)<0 mirror, out-of-bounds majority) — see [Coordinate System Conventions](#coordinate-system-conventions).
 
 ### FrustumCuller
 
@@ -260,11 +322,11 @@ far_z: 1000.0
 
 | Class | Description |
 |-------|-------------|
-| `Backend` | Abstract base class for all backends |
-| `NumPyBackend` | CPU backend based on NumPy (default fallback, uses pure Python projection path) |
-| `CPythonBackend` | High-performance C++ backend via pybind11 with OpenMP (auto-built, 10-15x faster) |
-| `CUDABackend` | GPU-accelerated backend via CuPy. Implements all three projection methods for full GPU acceleration. |
-| `BackendSelector` | Automatic backend selection with fallback. Priority: CUDA > C++ > NumPy |
+| `Backend` | Abstract base class, defines unified compute interface (preserved for future extension) |
+| `NumPyBackend` | NumPy + Numba JIT acceleration, the only available backend |
+| `BackendSelector` | Backend selector with architecture preserved. Currently always returns `NumPyBackend`. Future re-introduction of cuda/cpp only requires adding backend classes and updating `_BACKEND_THRESHOLDS`. |
+
+> **v2.0.0 change (Major Breaking)**: Removed `CPythonBackend` (C++) and `CUDABackend` (CUDA) implementations. Benchmark tests show that for 10Hz LiDAR frame-by-frame visualization scenarios, the net benefit of CUDA (1.46x speedup but 1.5ms startup overhead) is < 3% of the frame budget, while C++ offers < 1.5ms/frame advantage. Numba JIT has taken over the core acceleration scenarios (14x for line/box batch clipping). Reduced ~2500 lines of code, eliminated CuPy type-mixing bugs and C++ auto-build complexity. Architecture skeleton preserved for future re-introduction.
 
 ### ConfigLoader
 
@@ -273,6 +335,20 @@ far_z: 1000.0
 | `load_camera(file_path)` | Load camera from YAML/JSON file |
 | `load_camera_from_dict(config)` | Load camera from dictionary |
 | `save_camera_config(camera, file_path)` | Save camera to YAML/JSON file |
+
+### Conventions
+
+`autoproj.conventions` — Entry-point adaptation utilities (pure functions, no core math changes). See [Coordinate System Conventions](#coordinate-system-conventions) for usage.
+
+| Function / Constant | Description |
+|---------------------|-------------|
+| `build_transform(R=None, t=None, quat=None, quat_order='wxyz', direction='w2c')` | Build a 4×4 homogeneous transform from rotation + translation. Supports `wxyz`/`xyzw` quaternion order; `direction` declares `w2c` or `c2w` semantics (no implicit flipping). |
+| `invert_transform(T)` | Invert a rigid-body transform (c2w ↔ w2c). Uses `[R^T \| -R^T·t]` form, more stable than generic 4×4 inverse. |
+| `scale_intrinsics(fx, fy, cx, cy, src_size, dst_size)` | Scale intrinsics when calibration resolution ≠ usage resolution. Uses `+0.5/-0.5` pixel-center alignment. |
+| `check_transform_sanity(T, direction='w2c')` | Sanity-check a transform matrix (R orthogonality, det(R) sign, finite values). Warns on issues, does not raise. |
+| `AXIS_OPENGL_TO_OPENCV` | 4×4 axis transform `diag(1, -1, -1)` for OpenGL/Blender → OpenCV. |
+| `AXIS_OPENCV_TO_OPENGL` | Inverse of above (same matrix, self-inverse). |
+| `AXIS_ROS_REP103_TO_OPENCV_XFYFZU` | 4×4 axis remap for ROS REP-103 (x-front/y-left/z-up) → OpenCV camera axes. |
 
 ## Development
 
@@ -320,25 +396,26 @@ AutoProj supports multiple backends for different performance requirements:
 
 | Backend | Description | Requirements |
 |---------|-------------|--------------|
-| NumPy | CPU-based (default fallback) | numpy |
-| C++ | High-performance CPU via pybind11 (10-15x faster than NumPy) | g++/clang++ + pybind11 (auto-installed) |
-| CUDA | GPU-accelerated | cupy + CUDA toolkit |
+| NumPy | CPU-based, Numba JIT acceleration for batch operations | numpy + numba (optional) |
 
 ```python
 from autoproj import BackendSelector
 
-# Auto-select best available backend (CUDA > C++ > NumPy)
+# Auto-select (currently always returns NumPyBackend)
 backend = BackendSelector.select()
 print(f"Using backend: {backend.name()}")
 
-# Force specific backend
+# Explicit
 backend = BackendSelector.select('numpy')
-backend = BackendSelector.select('cpp')    # Auto-builds if not available
-backend = BackendSelector.select('cuda')   # Falls back to C++/NumPy if CUDA not available
+
+# Data-aware selection (currently always returns numpy; future extension point)
+backend = BackendSelector.select(n_points=1_000_000, operation='project_points')
 
 # List available backends
 available = BackendSelector.available_backends()
 ```
+
+> **Future extension**: To re-introduce C++/CUDA backends, add `cpp_backend.py` / `cuda_backend.py`, register them in `BackendSelector._backends` dict, and update `_BACKEND_THRESHOLDS` table. The architecture skeleton is preserved for this purpose.
 
 ## License
 

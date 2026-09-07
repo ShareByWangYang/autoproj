@@ -31,7 +31,7 @@ except Exception as e:
     sys.exit(1)
 
 try:
-    from autoproj.backends import NumPyBackend, CPythonBackend
+    from autoproj.backends import NumPyBackend
     print("  ✓ NumPyBackend 导入成功")
 except Exception as e:
     print(f"  ⚠ 导入后端模块失败: {e}")

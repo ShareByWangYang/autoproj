@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autoproj"
-version = "0.6.0"
-description = "High-precision 3D-to-2D projection engine"
+version = "2.1.0"
+description = "High-precision 3D-to-2D projection engine (numpy + numba JIT)"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["projection", "camera", "3d", "2d", "robotics", "computer-vision"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -23,7 +23,6 @@ classifiers = [
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
-    "Programming Language :: C++",
     "Topic :: Scientific/Engineering :: Image Processing",
     "Topic :: Scientific/Engineering :: Visualization",
 ]
@@ -34,15 +33,17 @@ dependencies = [
 
 [project.urls]
 Documentation = "https://autoproj.readthedocs.io/"
-"Bug Reports" = "https://github.com/autoproj/autoproj/issues"
-Source = "https://github.com/autoproj/autoproj"
+"Bug Reports" = "https://github.com/ShareByWangYang/autoproj/issues"
+Source = "https://github.com/ShareByWangYang/autoproj"
 
 [project.optional-dependencies]
-cuda = ["cupy>=12.0.0"]
+# numba 为批量接口 (project_boxes/project_lines) 提供 JIT 加速
+# 不安装时自动回退到 Python 循环路径
+jit = ["numba>=0.57.0"]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "pybind11>=2.10.0",
+    "numba>=0.57.0",
 ]
 docs = [
     "sphinx>=5.0.0",

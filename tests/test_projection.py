@@ -56,8 +56,8 @@ print(f"返回键: {list(result_dict.keys())}")
 print(f"corners形状: {result_dict['corners'].shape}")
 print(f"valid掩码: {result_dict['valid']}")
 print(f"裁剪后棱线数: {len(result_dict['edges'])}")
-for i, (p1, p2) in enumerate(result_dict['edges']):
-    print(f"  棱{i}: {p1} -> {p2}")
+for i, edge in enumerate(result_dict['edges']):
+    print(f"  棱{i}: {edge['pt1']} -> {edge['pt2']} (corner: {edge['pt1_is_corner']}, {edge['pt2_is_corner']})")
 
 # 测试3: project_box - 使用 Box3D 对象
 print("\n【测试3】project_box (Box3D 对象)")

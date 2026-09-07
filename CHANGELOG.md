@@ -4,6 +4,193 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [2.1.0] - 2026-09-07
+
+### 新增 (Added)
+
+- **`autoproj.conventions` 模块**：入口适配层，提供坐标系/外参/内参约定转换工具函数
+  - `build_transform(R, t, quat, quat_order, direction)`：统一外参构造，支持 wxyz/xyzw 四元数顺序、显式声明 w2c/c2w 方向
+  - `invert_transform(T)`：c2w ↔ w2c 互转（刚体变换精确逆）
+  - `scale_intrinsics(fx, fy, cx, cy, src_size, dst_size)`：分辨率变更时缩放内参（像素中心对齐）
+  - `check_transform_sanity(T, direction)`：外参合理性检查（R 正交性/det/有限性），发 warning 不抛异常
+  - 3 个预设轴变换矩阵：`AXIS_OPENGL_TO_OPENCV`、`AXIS_ROS_REP103_TO_OPENCV_XFYFZU`、`AXIS_OPENCV_TO_ROS_REP103_XFYFZU`
+- **`Projector(health_check=True)`**：投影健康检查开关
+  - 诊断三类静默错误：z<0 比例异常（外参方向反）、valid 率 <5%（轴向/单位/模型族错配）、det(R)<0（轴镜像）
+  - 仅发 warning 不自动修正，避免"打补丁式翻轴"连锁错误
+- **README "Coordinate System Conventions" 章节**：显式钉死契约（OpenCV 约定/外参方向/单位/畸变不可混用）+ 常见数据源对齐表
+- **GitHub Actions CI**（`.github/workflows/ci.yml`）：让 README 的 build badge 名副其实
+
+### 变更 (Changed)
+
+- **`pyproject.toml`**：版本 → 2.1.0；Development Status 升级为 `5 - Production/Stable`；
+  project.urls 修正为实际仓库地址 `ShareByWangYang/autoproj`（此前误写为 `autoproj/autoproj`）
+- **`autoproj/__init__.py`**：`__version__` → 2.1.0，导出 `conventions` 模块
+- **`frustum.py`**：修正 docstring 中相机系 y 轴方向笔误（"y: up" → "y: down"），补全 OpenCV 坐标系契约说明
+- **`camera.py`**：Camera 基类 docstring 新增坐标系契约块
+- **`projection.py`**：Projector docstring 同步契约并提示 c2w → w2c 的转换路径
+- **`README.md`**：补全 Projector API 表（此前缺失 `project_boxes`/`project_polygon`/`project_polygons`/`extend_edges_to_boundary`/`set_cull_frustum` 5 个方法）+ 新增 Conventions API 表
+
+### 性能优化
+
+- **`project_boxes` 向量化重写**（10K 框 3107ms → 410ms，**7.6x 提速**）：
+  - 棱端点构造：双重 Python 循环 → NumPy fancy-indexing
+  - 角点匹配：626k 次 `round()` + Python set 查找 → NumPy 广播 Chebyshev(L∞) 距离向量化
+  - 软裁剪：逐边 Python 分支 → mask + `np.where`
+  - 函数调用从 1.17M 次降至 50k 次
+- **消除 `hstack` 三处**（`project_points` / `project_boxes` / `Camera._transform_to_camera`）：
+  - 改为 `R @ p.T + t[:, None]` 广播，避免 (N,4) 齐次数组分配/拷贝
+  - 1M 点外参开销 40ms → 10ms（4x）
+- **`KannalaBrandtCamera` 清理**：
+  - 删除主路径死代码 `r_3d = np.sqrt(...)`（赋值后从未被计算引用），1M 点省 4.2ms
+  - 统一 `_project_raw_pixels` 的 KB 分支：`arccos + clip + r_3d` → `arctan2`，与主路径数学一致
+
+### 修复 (Fixed)
+
+- **`_project_raw_pixels` F-Theta 分支**：修复多项式属性名错误（`coeffs` 不存在 → `fw_poly`）+ 入射角公式错误（`arctan(r_xy)` → `arctan2(√(x²+y²), z)`），与 `FThetaCamera.project()` 主路径完全对齐
+- **`projection.py` 注释**：清理 v1.x CuPy 残留说明（CuPy 在 2.0.0 已移除）
+
+### 测试
+
+- 133 项 pytest 全通过，无回归
+- 34,722 条边逐边 bit-exact 对比（3 相机 × 软裁剪开/关）：像素差 0.0、corner 标志 0 不一致
+- `project_points` 1M 点输出 `array_equal` 完全一致
+
+## [2.0.0] - 2026-08-24
+
+### 重大变更 (Major Breaking Changes)
+
+- **移除 CUDA / C++ 后端**：基于完整基准测试 (`benchmark_results.csv`) 评估
+  - 自动驾驶 10Hz 雷达逐帧可视化场景下, CUDA 仅 1.46x 加速但启动开销 1.5ms, 净收益 < 3% 帧预算
+  - C++ 后端在 project_box/project_lines 上优势 < 1.5ms/帧, Numba JIT 已接管线段/框批量裁剪加速
+  - 净减少 ~2500 行代码 (cuda_backend.py / cpp_backend.py / _projection_cpp.cpp / build_utils.py)
+  - 消除 cupy/CuPy 类型混合 bug 风险 (self.np / _to_numpy / _align_to_np 兼容层)
+  - 消除首次使用 C++ 自动编译可能失败的问题
+  - 按 SemVer 规范, 破坏性 API 变更 (移除已导出的 CUDABackend/CPythonBackend 类) 触发主版本号升级 1.x → 2.0.0
+- **保留后端架构骨架**：为未来重新引入 cuda/cpp 后端预留扩展点
+  - `BackendSelector` 类结构保留, `_backends` 字典仅注册 'numpy'
+  - `_select_by_data_size` 接口保留, 当前始终返回 'numpy'
+  - `_BACKEND_THRESHOLDS` 表保留结构, 仅含 numpy 项
+  - `Backend` 抽象基类 (`base.py`) 完整保留
+  - 未来扩展只需: (1) 加入 cpp_backend.py/cuda_backend.py (2) 在 _get_backend 实现懒加载 (3) 更新 _BACKEND_THRESHOLDS
+
+### 变更 (Changed)
+
+- **`autoproj/__init__.py`**：移除 `CUDABackend`, `CPythonBackend` 导出, `__version__` 更新为 `2.0.0`
+- **`camera.py`**：移除 `self.np` / `_to_numpy` / `_align_to_np` / `hasattr(self.backend, 'project_xxx')` 分支
+  - 三个相机类 (Pinhole/KannalaBrandt/FTheta) 的 `project()` 仅保留 NumPy 向量化路径作为唯一实现
+- **`projection.py`**：移除 `np = self.np if hasattr(self, 'np') else __import__('numpy')` 兼容层
+- **`setup.py`**：移除 pybind11 / BuildExt / C++ 扩展配置, 简化为纯 Python 包
+- **`pyproject.toml`**：
+  - 版本统一为 `2.0.0` (代码库 `__version__` / `pyproject.toml` / `examples/benchmark.py` 全部对齐)
+  - 移除 `cuda` 可选依赖 (cupy)
+  - 移除 `dev` 中 pybind11
+  - 新增 `jit` 可选依赖 (numba)
+  - 移除 classifiers 中 "Programming Language :: C++"
+
+### 测试更新
+
+- **`test_backends.py`**：删除 cuda/cpp 相关测试, 新增 `test_select_unknown_raises` / `test_data_aware_returns_numpy` / `test_data_aware_cache`
+- **`test_batch_operations.py::TestBackendSelectorDataAware`**：所有断言改为 `assert b.name() == 'numpy'`
+- **删除**：`test_cpp_backend.py` / `test_auto_build.py`
+
+### 性能基准 (保留)
+
+- project_points 100K 点: numpy 6.0ms (10Hz 雷达 100ms 帧预算内)
+- project_boxes 10K 框 (Pinhole): numpy + Numba 批量接口 14x 加速 vs 单条循环
+- project_lines 1200 线段 (Pinhole): numpy + Numba 3.95x 加速 vs Python for 循环
+- project_boxes FTheta 10K 框: numpy + Numba 精确版 2.24x 加速 (原近似版 0.63x 负优化已修复)
+
+## [1.0.0] - 2026-08-24
+
+### 新增 (Added)
+
+- **`max_fov_deg` 参数**：替代 `max_fov_half_angle`，以度数设置鱼眼相机 FOV 上限
+  - `CameraFactory.create_fisheye()` 和 `create_pinhole()` 支持 `max_fov_deg` 参数
+  - `KannalaBrandtCamera` 和 `FThetaCamera` 在 `_compute_theta_max()` 中使用该参数限制搜索范围
+  - 默认 `None` 表示无上限（最大可用 FOV）
+  - 可视化代码支持从 `camera_config_dict` 读取配置
+- **`frustum_scale` 参数**：合并 `fov_tolerance` 和 `frustum_expansion` 为单一参数
+  - `None` = 自动计算（调用 `camera.compute_expansion_factor()`）
+  - `float` = 手动缩放因子（1.0 = 无缩放）
+  - `Projector(camera, frustum_scale=None)` 替代 `Projector(camera, frustum_expansion='auto')`
+- **`draw_pt1`/`draw_pt2` 返回值**：在 `project_box` 中直接返回实际绘制端点，简化可视化代码绘制逻辑
+- **`set_frustum_scale()` 方法**：替代 `set_frustum_expansion()`，支持动态更新视锥缩放因子
+- **`test_fov_limits.py` 测试文件**：覆盖大FOV场景
+  - `max_fov_deg` 参数传递测试
+  - 大FOV（θ > 90°）渲染测试
+  - FrustumCuller 大FOV裁剪测试
+  - FOV一致性测试
+
+### 变更 (Changed)
+
+- **参数体系重构**：
+  - 移除 `margin`，统一使用 `boundary_ratio`（边界余量比例）
+  - `cull_frustum` 由 `Union[bool, float]` 改为纯 `bool`
+  - `Projector` 构造函数参数调整：`frustum_scale=None` 替代 `frustum_expansion='auto'`
+- **`_check_bounds` 方法签名简化**：移除冗余的 `margin` 参数，方法内直接调用 `_get_dynamic_margin()` 计算边界余量
+- **向后兼容**：`frustum_expansion` 旧参数名通过 `**kwargs` 接收并发出 `DeprecationWarning`，`'auto'` 映射为 `None`
+- **可视化代码整合**：移除重复实现，统一使用 autoproj 库
+  - 删除 `_extend_edge_to_boundary()` 静态方法（重复实现）
+  - 删除 `_match_corner()` 静态方法，改用 `Projector._match_corner_pixel()`
+  - `clip_line_to_frustum()` 和 `_project_box_legacy()` 标记为 `[DEPRECATED]`
+
+### 修复 (Fixed)
+
+- **版本号不一致**：`__init__.py` 中 `__version__` 更新为 `1.0.0`
+- **`set_frustum_expansion` 属性名错误**：错误设置 `self.frustum_expansion`（不存在的属性），修复为正确设置 `self._frustum_scale`，并新增 `set_frustum_scale()` 作为推荐方法
+- **FrustumCuller NoneType错误**：修复 `frustum_scale` 为 `None` 时的 `max()` 调用错误
+- **可视化代码硬编码容差**：将两处硬编码的 `TOLERANCE = 3.0` 替换为使用 `projector._corner_match_tolerance`
+- **退化输入处理**：增加空数组、NaN 值、near_z=0 等边界情况的显式检查
+  - `Camera.__init__`：验证 `near_z>0`、`far_z>0`、`near_z<far_z`、`width>0`、`height>0`
+  - `FrustumCuller.__init__`：验证 `near_z>0`、`expansion_factor>0`
+  - `cull_points`：空数组返回空结果，NaN 点标记为无效
+  - `clip_line`：端点形状验证 `(3,)`，NaN 端点返回 `None`
+  - `project_points`：空数组返回空结果，NaN 点标记为无效
+  - `project_box`：角点形状验证 `(8,3)`，NaN 角点抛出 `ValueError`
+  - `project_polygon`：空多边形返回空结果
+  - `_project_raw_pixels`：空数组返回 `(0,2)` 空数组
+- **CUDA 后端类型混合错误**：修复 CuPy 数组与 NumPy 0维标量混合运算时报错 `Unsupported type <class 'numpy.ndarray'>`
+  - `FrustumCuller`：新增 `_to_python_scalar` / `_to_numpy` 静态方法，所有内部参数（`theta_max`、`cos_theta_max`、`tan_h`、`tan_v` 等）规范化为 Python float，所有公开方法（`cull_points`、`clip_line`、`is_point_inside`）输入强制转为 NumPy
+  - `Projector._project_raw_pixels`：将畸变系数（`k1`/`k2`/`p1`/`p2`/`fw_poly` 等）提取为 Python float 后参与运算，避免 NumPy 标量污染 CuPy 数组运算
+  - `PinholeCamera`：`dist_coeffs` 强制存储为 NumPy ndarray（与 backend 无关），消除 CuPy 数组传入 `np.testing.assert_array_almost_equal` 时的隐式转换错误
+  - `PinholeCamera._check_fov` / `KannalaBrandtCamera._check_fov` / `FThetaCamera._check_fov_theta`：`_real_tan_h`/`_real_tan_v`/`_theta_max`/`eff_scale` 等几何参数提取为 Python float 后参与比较
+  - `PinholeCamera._apply_distortion` / `KannalaBrandtCamera.project` / `FThetaCamera.project`：畸变系数 `k1`-`k6`/`p1`/`p2`/`fw_poly` 在参与投影计算前提取为 Python float/list
+  - `KannalaBrandtCamera._compute_theta_max` / `FThetaCamera._compute_theta_max`：几何参数预计算强制使用 NumPy（局部 `import numpy as np` 覆盖 `self.np`），返回值统一为 Python float
+  - `FThetaCamera.__init__`：`fw_poly` 强制存储为 NumPy ndarray（与 backend 无关）
+  - `Camera._transform_to_camera`：将 `backend.matmul` 返回值（CUDA 后端为 NumPy）转换为 `self.np` 类型后再返回，避免后续 `np.maximum` 等 ufunc 报错
+
+### 测试覆盖度
+
+- 全部 **107 个测试用例通过**（multi_traj conda 环境，CUDA 后端默认启用）
+- 新增 33 个退化输入测试（`test_degenerate_inputs.py`）
+- 测试覆盖：相机工厂、投影、视锥裁剪、配置加载、C++后端、CUDA后端、FOV限制、软裁剪、退化输入等
+- 验证 CUDA/C++/NumPy 三种后端在 Pinhole/KannalaBrandt/FTheta 三种相机上投影结果一致
+
+## [0.9.0] - 2026-08-19
+
+### 新增 (Added)
+
+- **`max_fov_deg` 参数**（原 `max_fov_half_angle`，1.0.0 已重命名）：允许用户自定义鱼眼相机 FOV 上限
+- **`Projector.corner_match_tolerance` 参数**：将硬编码的 `TOLERANCE=3.0` 提取为可配置参数
+  - 默认值 3.0 像素
+  - 用于判断裁剪端点是否为原始角点
+- **`test_fov_limits.py` 测试文件**：新增测试用例覆盖大FOV场景
+- **`FrustumCuller.from_camera()` None检查修复**：当 `frustum_scale` 为 `None` 时安全回退到默认值
+
+### 变更 (Changed)
+
+- **可视化代码整合**：移除重复实现，统一使用 autoproj 库
+
+### 修复 (Fixed)
+
+- **版本号不一致**：`__init__.py` 中 `__version__` 从 `0.8.0` 更新为 `0.9.0`
+- **FrustumCuller NoneType错误**：修复 `frustum_scale` 为 `None` 时的 `max()` 调用错误
+- **可视化代码硬编码容差**：将两处硬编码的 `TOLERANCE = 3.0` 替换为使用 `projector._corner_match_tolerance`
+
+### 测试覆盖度
+
+- 全部 **63 个测试用例通过**
+
 ## [0.8.0] - 2026-08-17
 
 ### 新增 (Added)
