@@ -851,6 +851,32 @@ class Projector:
         return results
 
     @staticmethod
+    def _match_corner_pixel(px, corner_set, tolerance):
+        """判断投影点是否匹配某个原始角点坐标
+
+        将 px round 到 0.1 像素后，与 corner_set 中的角点做容差匹配：
+        精确命中（set 查找）或 Chebyshev(L∞) 距离 <= tolerance 均视为匹配。
+
+        向后兼容：单/批向量化路径已改用 NumPy 广播完成角点匹配，
+        内部不再调用本方法；但保留供外部调用方（如可视化工具）直接复用。
+
+        Args:
+            px: (2,) 待判定像素坐标（float）
+            corner_set: set of (rx, ry)，角点像素 round(.,1) 后的坐标集合
+            tolerance: 匹配容差（像素）
+
+        Returns:
+            bool，是否匹配到某个原始角点
+        """
+        rx, ry = round(px[0], 1), round(px[1], 1)
+        if (rx, ry) in corner_set:
+            return True
+        for (cx, cy) in corner_set:
+            if abs(rx - cx) <= tolerance and abs(ry - cy) <= tolerance:
+                return True
+        return False
+
+    @staticmethod
     def extend_edges_to_boundary(
         edges: List[Dict],
         img_width: int,

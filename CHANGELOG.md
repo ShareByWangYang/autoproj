@@ -33,6 +33,12 @@
 - **`project_polygons` 边构造向量化**：边端点索引改用 `np.arange`/fancy-indexing
   构造，消除逐边 Python 追加循环；外参变换消除 `hstack`
 
+### 修复 (Fixed)
+
+- **恢复 `Projector._match_corner_pixel` 静态方法**：向量化重构曾移除该方法，
+  导致直接调用它的外部可视化脚本报 `AttributeError`。现恢复为公共兼容入口
+  （内部已改用 NumPy 广播匹配，此方法仅供外部调用方复用）。
+
 ### 性能优化
 
 | 场景 | 重构前 | 重构后 | 提速 |
