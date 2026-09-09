@@ -499,8 +499,10 @@ class Projector:
         1. (8, 3) ndarray: 包围盒的8个角点
         2. Box3D 对象: 使用其 corners 属性获取角点
 
-        当启用视锥裁剪时，会对包围盒的12条棱逐条进行
-        Liang-Barsky 裁剪，仅投影可见部分。
+        当启用视锥裁剪时，12 条棱通过 clip_lines_batch 向量化裁剪
+        （针孔为 Liang-Barsky，鱼眼为二次方程圆锥裁剪），仅投影可见部分。
+        单框与批量框共享同一向量化核心（见 _project_boxes_core），
+        数学完全一致，不存在单/批实现差异。
 
         Args:
             box_input: (8, 3) 角点数组 或 Box3D 对象
@@ -537,124 +539,13 @@ class Projector:
         if np.any(np.isnan(corners)):
             raise ValueError("box_input contains NaN values in corner coordinates")
 
-        # 变换到相机坐标系
-        if not pts_in_cam and T_to_cam is not None:
-            corners_h = np.hstack([corners, np.ones((len(corners), 1))])
-            corners_cam = (T_to_cam @ corners_h.T).T[:, :3]
-        else:
-            corners_cam = corners
-
-        # 投影角点
-        pixels, valid = self.camera.project(corners_cam, pts_in_cam=True)
-
-        # 确定裁剪行为
-        if cull_frustum is None:
-            cull_frustum = self._cull_frustum
-
-        # 预投影所有原始角点到2D（不裁剪），用于后续识别裁剪点
-        raw_corner_pixels = self._project_raw_pixels(corners_cam)
-
-        # 对12条棱逐条裁剪
-        edges = []
-        if cull_frustum and self._culler is not None:
-            # 预先收集所有棱的裁剪结果
-            clipped_edges_cam = []  # List[(p1_clipped_cam, p2_clipped_cam, i, j)]
-            for i, j in LineSet.BOX_EDGES:
-                clipped = self._culler.clip_line(corners_cam[i], corners_cam[j])
-                if clipped is not None:
-                    p1_clipped, p2_clipped = clipped
-                    near_sq = self.camera.near_z ** 2
-                    r1_sq = p1_clipped[0]**2 + p1_clipped[1]**2 + p1_clipped[2]**2
-                    r2_sq = p2_clipped[0]**2 + p2_clipped[1]**2 + p2_clipped[2]**2
-                    if r1_sq >= near_sq and r2_sq >= near_sq:
-                        clipped_edges_cam.append((p1_clipped, p2_clipped, i, j))
-
-            # 批量投影所有裁剪后的端点到像素坐标
-            if clipped_edges_cam:
-                all_pts = np.array(
-                    [list(pair[:2]) for pair in clipped_edges_cam],
-                    dtype=np.float64
-                ).reshape(-1, 3)
-                all_pixels_raw = self._project_raw_pixels(all_pts)
-
-                # 构建角点像素集合（用于容差匹配）
-                corner_px_set = set()
-                for px, py in raw_corner_pixels:
-                    corner_px_set.add((round(px, 1), round(py, 1)))
-
-                idx = 0
-                for p1_cam, p2_cam, i, j in clipped_edges_cam:
-                    p1_px = all_pixels_raw[idx]
-                    p2_px = all_pixels_raw[idx + 1]
-                    idx += 2
-
-                    # 判断端点是否为原始角点（使用可配置的容差）
-                    p1_is_corner = self._match_corner_pixel(p1_px, corner_px_set, self._corner_match_tolerance)
-                    p2_is_corner = self._match_corner_pixel(p2_px, corner_px_set, self._corner_match_tolerance)
-
-                    # 软裁剪：修正针孔相机对角线方向的裁剪偏差
-                    # 仅对针孔相机（矩形棱锥视锥）生效，鱼眼相机使用锥形视锥无此问题
-                    if (self._soft_clip_ratio is not None and
-                            self._culler is not None and
-                            self._culler.frustum_type == FrustumType.PYRAMID):
-                        pixel_threshold = self._soft_clip_ratio * min(self.camera.width, self.camera.height)
-                        # 1像素 margin 防止数值精度导致误拒
-                        margin = 1
-                        w, h = self.camera.width, self.camera.height
-
-                        if not p1_is_corner:
-                            orig_px = raw_corner_pixels[i]
-                            if (-margin <= orig_px[0] <= w + margin and
-                                -margin <= orig_px[1] <= h + margin):
-                                dist = np.linalg.norm(p1_px - orig_px)
-                                if dist < pixel_threshold:
-                                    p1_px = orig_px
-                                    p1_is_corner = True
-
-                        if not p2_is_corner:
-                            orig_px = raw_corner_pixels[j]
-                            if (-margin <= orig_px[0] <= w + margin and
-                                -margin <= orig_px[1] <= h + margin):
-                                dist = np.linalg.norm(p2_px - orig_px)
-                                if dist < pixel_threshold:
-                                    p2_px = orig_px
-                                    p2_is_corner = True
-
-                    edge_dict = {
-                        'pt1': p1_px,
-                        'pt2': p2_px,
-                        'draw_pt1': p1_px,
-                        'draw_pt2': p2_px,
-                        'pt1_is_corner': p1_is_corner,
-                        'pt2_is_corner': p2_is_corner,
-                    }
-                    edges.append(edge_dict)
-        else:
-            # 无裁剪：直接连接有效角点
-            for i, j in LineSet.BOX_EDGES:
-                if valid[i] and valid[j]:
-                    edges.append({
-                        'pt1': pixels[i],
-                        'pt2': pixels[j],
-                        'draw_pt1': pixels[i],
-                        'draw_pt2': pixels[j],
-                        'pt1_is_corner': True,
-                        'pt2_is_corner': True,
-                    })
-
-        # 2D 延长到图像边界
-        if extend_to_boundary and edges:
-            edges = self.extend_edges_to_boundary(edges, self.camera.width, self.camera.height)
-
-        return {
-            'corners': pixels,
-            'valid': valid,
-            'edges': edges,
-            'box': box_obj
-        }
-
-    # 批量模式下, 角点数 > 此值时启用向量化路径
-    _BATCH_BOX_THRESHOLD = 64
+        # 单元素复用批量向量化核心 (N=1)：单框与批量框共享完全相同的
+        # 批量变换/裁剪/投影/角点匹配/软裁剪数学，结果一致且无阈值悬崖。
+        return self._project_boxes_core(
+            corners[None, :, :], [box_obj],
+            T_to_cam=T_to_cam, pts_in_cam=pts_in_cam,
+            cull_frustum=cull_frustum, extend_to_boundary=extend_to_boundary
+        )[0]
 
     def project_boxes(
         self,
@@ -667,10 +558,11 @@ class Projector:
         """
         批量投影 3D 包围盒集合到图像平面
 
-        混合策略 (方案 C):
-        - N <= _BATCH_BOX_THRESHOLD: 调用现有 project_box 逐条处理, 保兼容性
-        - N >  _BATCH_BOX_THRESHOLD: 走向量化路径,
-          一次性变换/投影所有角点 + clip_lines_batch 批量裁剪 + 批量投影裁剪点
+        所有 N（含 N=1）统一走 _project_boxes_core 向量化路径:
+        一次性变换/投影所有角点 + clip_lines_batch 批量裁剪 +
+        批量投影裁剪点 + 向量化角点匹配/软裁剪。
+        project_box 单框是本方法 N=1 的薄包装，二者数学完全一致，
+        无小批量回退、无阈值悬崖。
 
         返回格式与 project_box 完全一致 (List[Dict]), 调用方可直接迭代使用.
 
@@ -743,20 +635,47 @@ class Projector:
                 f"boxes contain NaN values at indices: {bad_idx.tolist()}"
             )
 
-        # 小批量: 直接走单条 project_box (兼容性优先)
-        if N <= self._BATCH_BOX_THRESHOLD:
-            results = []
-            for i in range(N):
-                result = self.project_box(
-                    corners_arr[i], T_to_cam=T_to_cam, pts_in_cam=pts_in_cam,
-                    cull_frustum=cull_frustum, extend_to_boundary=extend_to_boundary
-                )
-                # 替换 box 引用
-                result['box'] = box_objs[i]
-                results.append(result)
-            return results
+        return self._project_boxes_core(
+            corners_arr, box_objs,
+            T_to_cam=T_to_cam, pts_in_cam=pts_in_cam,
+            cull_frustum=cull_frustum, extend_to_boundary=extend_to_boundary
+        )
 
-        # 大批量向量化路径
+    def _project_boxes_core(
+        self,
+        corners_arr: np.ndarray,
+        box_objs: List[Optional['Box3D']],
+        T_to_cam: Optional[np.ndarray] = None,
+        pts_in_cam: bool = False,
+        cull_frustum: Optional[bool] = None,
+        extend_to_boundary: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        框投影向量化核心（单框/批量共享）
+
+        处理 N 个包围盒（N≥1）: 一次性批量变换角点、批量投影、
+        clip_lines_batch 批量裁剪（N*12 条棱）、批量投影裁剪端点、
+        向量化角点匹配与软裁剪，最后按框装配结果字典。
+
+        裁剪路径随棱数自动缩放:
+        - N*12 <= 32 时 clip_lines_batch 内部走精确逐边 Python 路径
+          （单框 N=1 = 12 条棱，裁剪结果与逐条 clip_line 完全一致）
+        - N*12 > 32 时自动切换 Numba 并行 kernel
+        因此单框与批量性能连续、无阈值悬崖。
+
+        Args:
+            corners_arr: (N, 8, 3) float64 角点数组（已通过形状/NaN 校验）
+            box_objs: 长度 N 的 Box3D 对象列表（ndarray 输入时为 None）
+            T_to_cam: 外参变换矩阵 (4x4)
+            pts_in_cam: 是否已在相机坐标系
+            cull_frustum: 覆盖默认裁剪行为
+            extend_to_boundary: 是否将裁剪点延长到图像边界
+
+        Returns:
+            List[Dict], 长度 N，每项结构同 project_box() 返回值
+        """
+        N = corners_arr.shape[0]
+
         if cull_frustum is None:
             cull_frustum = self._cull_frustum
 
@@ -866,7 +785,7 @@ class Projector:
             p2_px = ep[:, 1].copy()
 
             # --- 角点匹配（向量化）---
-            # 与 _match_corner_pixel 语义一致：round(.,1) 后 Chebyshev(L∞) 距离 <= tol
+            # 语义: round(.,1) 后与所属框 8 个原始角点的最小 Chebyshev(L∞) 距离 <= tol
             # box_corners: (E,8,2) 每条边所属框的 8 个原始角点像素
             box_corners = raw_corner_pixels[vb]            # (E,8,2)
             rc = np.round(box_corners, 1)                  # (E,8,2)
@@ -930,17 +849,6 @@ class Projector:
             })
 
         return results
-
-    @staticmethod
-    def _match_corner_pixel(px, corner_set, tolerance):
-        """判断投影点是否匹配某个原始角点坐标"""
-        rx, ry = round(px[0], 1), round(px[1], 1)
-        if (rx, ry) in corner_set:
-            return True
-        for (cx, cy) in corner_set:
-            if abs(rx - cx) <= tolerance and abs(ry - cy) <= tolerance:
-                return True
-        return False
 
     @staticmethod
     def extend_edges_to_boundary(
@@ -1111,50 +1019,37 @@ class Projector:
         # 批量变换所有端点到相机坐标系
         all_pts = np.array(segments, dtype=np.float64).reshape(-1, 3)  # (2*n_seg, 3)
         if not pts_in_cam and T_to_cam is not None:
-            ones = np.ones((len(all_pts), 1))
-            all_pts_h = np.hstack([all_pts, ones])
-            all_pts_cam = (T_to_cam @ all_pts_h.T).T[:, :3]
+            # R @ p.T + t 广播，避免 hstack 齐次数组分配
+            _R = T_to_cam[:3, :3]
+            _t = T_to_cam[:3, 3]
+            all_pts_cam = (_R @ all_pts.T + _t[:, None]).T
         else:
             all_pts_cam = all_pts
 
         p1s = all_pts_cam[0::2]  # (n_seg, 3) 所有起点
         p2s = all_pts_cam[1::2]  # (n_seg, 3) 所有终点
 
-        result = []
+        # 预分配结果（无效线段保持 None），仅回填有效项
+        result: List[Optional[Tuple[np.ndarray, np.ndarray]]] = [None] * n_seg
 
         if cull_frustum and self._culler is not None:
-            # 视锥裁剪路径：使用 clip_lines_batch 一次性批量裁剪 (内部 Numba JIT 加速)
-            # 替代逐条 clip_line 的 Python for 循环, 大规模线段场景显著加速
-            clipped, valid = self._culler.clip_lines_batch(p1s, p2s)
+            # 视锥裁剪路径：clip_lines_batch 一次性批量裁剪 (内部 Numba JIT 加速)
             # valid[i]=True 表示该线段裁剪后有效 (含 near_sq 径向距离校验)
-            # valid[i]=False 表示整段在视锥外或径向距离过近
+            clipped, valid = self._culler.clip_lines_batch(p1s, p2s)
 
-            # 批量投影所有裁剪后的有效端点 (一次完成)
+            # 批量投影所有裁剪后的有效端点 (一次完成)，按原线段索引回填
             valid_indices = np.where(valid)[0]
             if len(valid_indices) > 0:
                 clip_pts = clipped[valid_indices].reshape(-1, 3)  # (M*2, 3)
-                clip_pixels = self._project_raw_pixels(clip_pts)  # (M*2, 2+)
-
-                # 按 seg_idx 顺序填充结果 (保持与输入顺序一致)
-                next_valid_idx = 0
-                for i in range(n_seg):
-                    if next_valid_idx < len(valid_indices) and valid_indices[next_valid_idx] == i:
-                        px1 = clip_pixels[next_valid_idx * 2]
-                        px2 = clip_pixels[next_valid_idx * 2 + 1]
-                        result.append((px1, px2))
-                        next_valid_idx += 1
-                    else:
-                        result.append(None)
-            else:
-                result = [None] * n_seg
+                clip_pixels = self._project_raw_pixels(clip_pts).reshape(-1, 2, 2)
+                for k, seg_idx in enumerate(valid_indices):
+                    result[seg_idx] = (clip_pixels[k, 0], clip_pixels[k, 1])
         else:
-            # 无裁剪：批量投影所有端点
+            # 无裁剪：批量投影所有端点，两端均有效则线段有效（向量化判断）
             all_pixels, all_valid = self.camera.project(all_pts_cam, pts_in_cam=True)
-            for i in range(n_seg):
-                if all_valid[i * 2] and all_valid[i * 2 + 1]:
-                    result.append((all_pixels[i * 2], all_pixels[i * 2 + 1]))
-                else:
-                    result.append(None)
+            seg_ok = all_valid[0::2] & all_valid[1::2]
+            for seg_idx in np.where(seg_ok)[0]:
+                result[seg_idx] = (all_pixels[seg_idx * 2], all_pixels[seg_idx * 2 + 1])
 
         return result
 
@@ -1167,6 +1062,10 @@ class Projector:
     ) -> Dict[str, Any]:
         """
         投影 3D 多边形到图像平面
+
+        单多边形是 project_polygons N=1 的薄包装：边裁剪通过
+        clip_lines_batch 向量化完成，与批量路径共享完全相同的数学，
+        不存在单/批实现差异。
 
         Args:
             polygon: Polygon3D 对象
@@ -1181,10 +1080,8 @@ class Projector:
                 'edges': List[(pixel0, pixel1)] 裁剪后的边像素对
                 'polygon': 原始 Polygon3D 对象
         """
-        vertices = polygon.vertices
-
-        # 空多边形：返回空结果
-        if len(vertices) == 0:
+        # 空多边形：直接返回空结果
+        if len(polygon.vertices) == 0:
             return {
                 'vertices': np.empty((0, 2), dtype=np.int32),
                 'valid': np.empty(0, dtype=bool),
@@ -1192,62 +1089,14 @@ class Projector:
                 'polygon': polygon
             }
 
-        # 变换到相机坐标系
-        if not pts_in_cam and T_to_cam is not None:
-            vertices_h = np.hstack([vertices, np.ones((len(vertices), 1))])
-            vertices_cam = (T_to_cam @ vertices_h.T).T[:, :3]
-        else:
-            vertices_cam = vertices
-
-        # 投影顶点
-        pixels, valid = self.camera.project(vertices_cam, pts_in_cam=True)
-
-        # 确定裁剪行为
-        if cull_frustum is None:
-            cull_frustum = self._cull_frustum
-
-        # 对每条边进行裁剪
-        edges = []
-        n = len(vertices_cam)
-        if cull_frustum and self._culler is not None:
-            for i in range(n):
-                if polygon.is_closed:
-                    j = (i + 1) % n
-                else:
-                    if i >= n - 1:
-                        break
-                    j = i + 1
-
-                clipped = self._culler.clip_line(vertices_cam[i], vertices_cam[j])
-                if clipped is not None:
-                    p1_clipped, p2_clipped = clipped
-                    # 保护 z>0
-                    if p1_clipped[2] <= 1e-6 or p2_clipped[2] <= 1e-6:
-                        continue
-                    edge_pixels_raw = self._project_raw_pixels(
-                        np.array([p1_clipped, p2_clipped])
-                    )
-                    edges.append((edge_pixels_raw[0], edge_pixels_raw[1]))
-        else:
-            for i in range(n):
-                if polygon.is_closed:
-                    j = (i + 1) % n
-                else:
-                    if i >= n - 1:
-                        break
-                    j = i + 1
-                if valid[i] and valid[j]:
-                    edges.append((pixels[i], pixels[j]))
-
-        return {
-            'vertices': pixels,
-            'valid': valid,
-            'edges': edges,
-            'polygon': polygon
-        }
-
-    # 批量模式下, 多边形数 > 此值时启用向量化路径
-    _BATCH_POLYGON_THRESHOLD = 32
+        # 单元素复用批量向量化路径 (N=1)：边裁剪/投影与批量完全一致
+        # （近裁剪面使用径向距离检查，对鱼眼 z<0 边缘点同样正确）
+        result = self.project_polygons(
+            [polygon], T_to_cam=T_to_cam, pts_in_cam=pts_in_cam,
+            cull_frustum=cull_frustum
+        )[0]
+        result['polygon'] = polygon
+        return result
 
     def project_polygons(
         self,
@@ -1259,13 +1108,13 @@ class Projector:
         """
         批量投影 3D 多边形集合到图像平面
 
-        混合策略 (方案 C):
-        - N <= _BATCH_POLYGON_THRESHOLD: 调用现有 project_polygon 逐条处理
-        - N >  _BATCH_POLYGON_THRESHOLD: 走向量化路径,
-          一次性变换/投影所有顶点 + clip_lines_batch 批量裁剪边
+        所有 N（含 N=1）统一走向量化路径:
+        一次性变换/投影所有顶点 + clip_lines_batch 批量裁剪边。
+        project_polygon 单多边形是本方法 N=1 的薄包装，二者数学完全一致，
+        无小批量回退、无阈值悬崖。
 
-        注意: 各多边形顶点数可不同, 因此批量向量化路径需按"边"为单元处理,
-        而非按"多边形". CONE 类型近似裁剪回退逻辑同 project_boxes.
+        注意: 各多边形顶点数可不同, 因此按"边"为单元构造索引后批量处理,
+        而非按"多边形"。CONE 类型的 NaN 回退逻辑同 project_boxes。
 
         Args:
             polygons: List[Polygon3D] 或 List[(M, 3) ndarray]
@@ -1305,68 +1154,47 @@ class Projector:
         if cull_frustum is None:
             cull_frustum = self._cull_frustum
 
-        # 小批量: 走单条 project_polygon
-        if N <= self._BATCH_POLYGON_THRESHOLD:
-            results = []
-            for i in range(N):
-                # 如果原对象是 Polygon3D, 直接传入
-                if poly_objs[i] is not None:
-                    result = self.project_polygon(
-                        poly_objs[i], T_to_cam=T_to_cam, pts_in_cam=pts_in_cam,
-                        cull_frustum=cull_frustum
-                    )
-                else:
-                    # 构造临时 Polygon3D 对象
-                    tmp = _Polygon3D(vert_list[i], is_closed=is_closed_list[i])
-                    result = self.project_polygon(
-                        tmp, T_to_cam=T_to_cam, pts_in_cam=pts_in_cam,
-                        cull_frustum=cull_frustum
-                    )
-                    result['polygon'] = None
-                results.append(result)
-            return results
-
-        # 大批量向量化路径
-        # 1) 收集所有顶点 + 边端点, 一次性变换和投影
-        all_verts_flat_list = []
+        # 1) 收集所有顶点, 一次性变换和投影
         vert_offsets = []  # 每个多边形顶点在 flat 中的起始位置
         offset = 0
         for v in vert_list:
             vert_offsets.append(offset)
-            all_verts_flat_list.append(v)
             offset += len(v)
-        all_verts_flat = np.concatenate(all_verts_flat_list, axis=0)  # (sum_M, 3)
+        all_verts_flat = np.concatenate(vert_list, axis=0) if vert_list else np.empty((0, 3))
 
-        if not pts_in_cam and T_to_cam is not None:
-            ones = np.ones((len(all_verts_flat), 1))
-            verts_h = np.hstack([all_verts_flat, ones])
-            all_verts_cam = (T_to_cam @ verts_h.T).T[:, :3]
+        if not pts_in_cam and T_to_cam is not None and len(all_verts_flat) > 0:
+            # R @ p.T + t 广播，避免 hstack 齐次数组
+            _R = T_to_cam[:3, :3]
+            _t = T_to_cam[:3, 3]
+            all_verts_cam = (_R @ all_verts_flat.T + _t[:, None]).T
         else:
             all_verts_cam = all_verts_flat
 
         # 2) 批量投影所有顶点
-        pixels_flat, valid_flat = self.camera.project(all_verts_cam, pts_in_cam=True)
-        pixels_2d_flat = pixels_flat[:, :2]
+        if len(all_verts_cam) > 0:
+            pixels_flat, valid_flat = self.camera.project(all_verts_cam, pts_in_cam=True)
+            pixels_2d_flat = pixels_flat[:, :2]
+        else:
+            pixels_2d_flat = np.empty((0, 2), dtype=np.float64)
+            valid_flat = np.empty(0, dtype=bool)
 
-        # 3) 构造所有边 (按多边形顺序)
-        edge_p1s_list = []
-        edge_p2s_list = []
-        edge_meta = []  # (poly_idx, edge_idx_in_poly, vi, vj)
+        # 3) 构造所有边的全局顶点索引 (按多边形顺序) —— 向量化
+        edge_vi_list, edge_vj_list, edge_poly_list = [], [], []
         for p_idx, v in enumerate(vert_list):
             m = len(v)
             if m == 0:
                 continue
             start = vert_offsets[p_idx]
-            is_closed = is_closed_list[p_idx]
-            n_edges = m if is_closed else m - 1
-            for e in range(n_edges):
-                i = e
-                j = (e + 1) % m if is_closed else e + 1
-                edge_p1s_list.append(all_verts_cam[start + i])
-                edge_p2s_list.append(all_verts_cam[start + j])
-                edge_meta.append((p_idx, e, i, j))
+            n_edges = m if is_closed_list[p_idx] else m - 1
+            e_idx = np.arange(n_edges, dtype=np.int64)
+            edge_vi_list.append(start + e_idx)
+            if is_closed_list[p_idx]:
+                edge_vj_list.append(start + (e_idx + 1) % m)
+            else:
+                edge_vj_list.append(start + e_idx + 1)
+            edge_poly_list.append(np.full(n_edges, p_idx, dtype=np.int64))
 
-        if len(edge_p1s_list) == 0:
+        if len(edge_vi_list) == 0:
             # 所有多边形为空, 直接返回
             results = []
             for p_idx in range(N):
@@ -1380,21 +1208,21 @@ class Projector:
                 })
             return results
 
-        edge_p1s = np.array(edge_p1s_list, dtype=np.float64)
-        edge_p2s = np.array(edge_p2s_list, dtype=np.float64)
+        edge_vi = np.concatenate(edge_vi_list)    # (E_total,) 边起点全局顶点索引
+        edge_vj = np.concatenate(edge_vj_list)    # (E_total,) 边终点全局顶点索引
+        edge_poly = np.concatenate(edge_poly_list)  # (E_total,) 边所属多边形索引
+        edge_p1s = all_verts_cam[edge_vi]
+        edge_p2s = all_verts_cam[edge_vj]
 
         # 4) 批量裁剪
         if cull_frustum and self._culler is not None:
             clipped, edge_valid = self._culler.clip_lines_batch(edge_p1s, edge_p2s)
         else:
-            # 无裁剪: 直接连线
+            # 无裁剪: 直接连线，两端顶点均有效则边有效（向量化）
             clipped = np.empty((len(edge_p1s), 2, 3), dtype=np.float64)
             clipped[:, 0] = edge_p1s
             clipped[:, 1] = edge_p2s
-            edge_valid = np.zeros(len(edge_p1s), dtype=bool)
-            for k, (p_idx, e, i, j) in enumerate(edge_meta):
-                start = vert_offsets[p_idx]
-                edge_valid[k] = valid_flat[start + i] and valid_flat[start + j]
+            edge_valid = valid_flat[edge_vi] & valid_flat[edge_vj]
 
         # 5) 批量投影裁剪端点
         valid_indices = np.where(edge_valid)[0]
@@ -1418,7 +1246,7 @@ class Projector:
         poly_edges_dict: List[List] = [[] for _ in range(N)]
 
         for k, edge_k in enumerate(valid_indices):
-            p_idx, e, i, j = edge_meta[edge_k]
+            p_idx = int(edge_poly[edge_k])
             # 检查是否为 NaN (CONE 近似版)
             base_clip_idx = k * 2
             if nan_mask[base_clip_idx] or nan_mask[base_clip_idx + 1]:

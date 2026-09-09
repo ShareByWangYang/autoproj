@@ -4,6 +4,52 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+## [2.1.1] - 2026-09-09
+
+### 变更 (Changed)
+
+- **单元素/批量投影路径统一为真实向量化（架构对齐）**
+  - 此前 `project_box`/`project_polygon` 单元素路径使用 Python for 循环逐条
+    `clip_line` + 逐条投影 + set 角点匹配，而 `project_boxes`/`project_polygons`
+    仅在 N 超过阈值（64/32）时才走向量化路径，导致阈值悬崖：
+    N=64→65 框投影耗时从 38.6ms 暴跌至 1.9ms（20 倍反直觉跳变）
+  - 现重构为"单元素是批量核心 N=1 的薄包装"：
+    - 新增 `_project_boxes_core` 向量化核心（N≥1 通用），`project_box` 改为
+      调用核心的 N=1 路径
+    - `project_polygon` 改为调用 `project_polygons` 的 N=1 路径
+    - 删除 `_BATCH_BOX_THRESHOLD`/`_BATCH_POLYGON_THRESHOLD` 阈值与小批量回退分支
+    - 删除单元素路径的 Python 循环裁剪与 `_match_corner_pixel` 静态方法
+  - 单元素与批量共享完全相同的批量变换/裁剪/投影/角点匹配/软裁剪数学，
+    性能随棱数连续缩放（clip_lines_batch 内部 ≤32 棱走精确逐边裁剪、
+    >32 棱自动切换 Numba 并行），无阈值悬崖
+- **`project_polygon` 近裁剪面检查修正**：旧单元素路径用 `z <= 1e-6` 判定，
+  会错误丢弃鱼眼相机 θ>90° 的 z<0 有效边缘点；现统一为径向距离检查
+  （`r >= near_z`），与批量路径及鱼眼投影模型一致
+- **`project_lines` 结果填充向量化**：消除外参 `hstack` 残留（改用
+  `R @ p.T + t` 广播），结果列表预分配 + 按索引回填，无裁剪分支用
+  向量化掩码判断线段有效性
+- **`project_polygons` 边构造向量化**：边端点索引改用 `np.arange`/fancy-indexing
+  构造，消除逐边 Python 追加循环；外参变换消除 `hstack`
+
+### 性能优化
+
+| 场景 | 重构前 | 重构后 | 提速 |
+|---|---|---|---|
+| 64 框投影（阈值悬崖点） | 38.6 ms | 1.94 ms | ~20x |
+| 单框 project_box | 690 µs | 475 µs | 1.45x |
+| 100 框投影 | 2.80 ms（已向量化） | 2.94 ms | 持平 |
+| 1000 框投影 | 30.3 ms | 31.7 ms | 持平 |
+| 120K 线段投影 | 314 ms | 280 ms | 1.12x |
+
+### 测试
+
+- 133 项 pytest 全通过
+- 新增单-批一致性验证：16,445 条边（3 相机 × 裁剪开/关 × 框/多边形）
+  单元素与批量结果 bit-exact（像素差 < 1e-9，角点标志 0 不一致）
+- 阈值悬崖消除验证：N=64 与 N=65 耗时连续（1.94ms vs 2.00ms）
+
 ## [2.1.0] - 2026-09-07
 
 ### 新增 (Added)

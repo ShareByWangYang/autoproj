@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autoproj"
-version = "2.1.0"
+version = "2.1.1"
 description = "High-precision 3D-to-2D projection engine (numpy + numba JIT)"
 readme = "README.md"
 requires-python = ">=3.8"
