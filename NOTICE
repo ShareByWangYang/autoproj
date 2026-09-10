@@ -1,0 +1,16 @@
+autoproj
+Copyright (c) 2026 FeiChangShuai
+
+This product includes software developed by third parties:
+
+- NumPy (BSD 3-Clause License, Copyright NumPy developers)
+  https://numpy.org/
+
+- PyYAML (MIT License, Copyright Kirill Simonov)
+  https://pyyaml.org/
+
+- Numba (BSD 2-Clause License, Copyright Anaconda, Inc.)
+  https://numba.pydata.org/
+
+- pytest (MIT License, Copyright Holger Krekel and pytest contributors)
+  https://pytest.org/

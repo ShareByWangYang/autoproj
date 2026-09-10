@@ -384,6 +384,8 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 MIT License - see [LICENSE](LICENSE) for details.
 
+Third-party licenses are listed in [NOTICE](NOTICE).
+
 ## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
@@ -394,9 +396,29 @@ If you use AutoProj in your research, please cite:
 
 ```bibtex
 @software{autoproj,
-  author = {Wang Yang},
+  author = {FeiChangShuai},
   title = {AutoProj: High-precision 3D-to-2D projection engine},
-  year = {2024},
+  year = {2026},
   url = {https://github.com/ShareByWangYang/autoproj}
 }
 ```
+
+## Disclaimer
+
+This project is not affiliated with any other project of the same name.
+The author of this project is FeiChangShuai, not the repository owner
+`ShareByWangYang` (which is only the hosting location).
+
+**AI-Assisted Development (Vibe Coding)**: This project was developed with
+the assistance of AI coding tools (vibe coding). All code has been reviewed
+and tested by the author, but the AI-assisted nature of development is
+disclosed for transparency. Users are encouraged to review the code and
+run the test suite before production use.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. In no event shall the
+authors or copyright holders be liable for any claim, damages or other
+liability, whether in an action of contract, tort or otherwise, arising from,
+out of or in connection with the software or the use or other dealings in the
+software.

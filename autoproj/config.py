@@ -1,3 +1,21 @@
+"""
+Config - 相机配置加载/保存模块
+
+支持从 YAML/JSON 文件加载相机参数，自动识别相机类型（pinhole/kannala_brandt/f_theta），
+并提供配置文件保存功能。
+
+支持的配置格式：
+    - YAML（推荐，可读性更好）
+    - JSON（便于程序间交换）
+
+配置文件结构：
+    camera:
+      type: pinhole | kannala_brandt | f_theta
+      width: 1920
+      height: 1080
+      ...（各相机类型专属参数）
+"""
+
 import yaml
 import json
 import numpy as np

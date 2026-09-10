@@ -1,3 +1,15 @@
+"""
+Factory - 相机工厂模块
+
+提供按类型名称创建相机对象的统一接口，支持分层命名（类别/子类型）。
+便于从配置文件或命令行参数构造相机实例。
+
+支持的相机类型：
+    - pinhole: 针孔相机（OpenCV 8 参数畸变模型）
+    - kannala_brandt: KB 鱼眼相机（θ 多项式畸变模型，即 OpenCV fisheye）
+    - f_theta: F-Theta 鱼眼相机（多项式焦距模型）
+"""
+
 from typing import Optional, Dict, Type, Any, List
 from .camera import Camera, PinholeCamera, KannalaBrandtCamera, FThetaCamera
 

@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "AutoProj Development Team"}
+    {name = "FeiChangShuai", email = "FeiChangShuai@users.noreply.github.com"}
 ]
 keywords = ["projection", "camera", "3d", "2d", "robotics", "computer-vision"]
 classifiers = [

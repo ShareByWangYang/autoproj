@@ -1,3 +1,12 @@
+"""
+Geometry - 3D 几何体数据结构模块
+
+提供点云、3D 包围盒、线段集合、多边形等几何体的数据结构定义。
+所有几何体均以 NumPy 数组存储，便于与投影/裁剪模块进行向量化运算。
+
+坐标系契约：OpenCV 约定（x 右 / y 下 / z 前），单位为米。
+"""
+
 import numpy as np
 from typing import Optional, Union, List, Tuple
 
