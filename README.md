@@ -318,16 +318,6 @@ far_z: 1000.0
 | `PointCloud` | Point cloud with optional colors and intensity. Supports `transform()` and `filter_by_mask()`. |
 | `Box3D` | 3D bounding box with yaw rotation. Provides `corners` property and serialization methods. |
 
-### Backend
-
-| Class | Description |
-|-------|-------------|
-| `Backend` | Abstract base class, defines unified compute interface (preserved for future extension) |
-| `NumPyBackend` | NumPy + Numba JIT acceleration, the only available backend |
-| `BackendSelector` | Backend selector with architecture preserved. Currently always returns `NumPyBackend`. Future re-introduction of cuda/cpp only requires adding backend classes and updating `_BACKEND_THRESHOLDS`. |
-
-> **v2.0.0 change (Major Breaking)**: Removed `CPythonBackend` (C++) and `CUDABackend` (CUDA) implementations. Benchmark tests show that for 10Hz LiDAR frame-by-frame visualization scenarios, the net benefit of CUDA (1.46x speedup but 1.5ms startup overhead) is < 3% of the frame budget, while C++ offers < 1.5ms/frame advantage. Numba JIT has taken over the core acceleration scenarios (14x for line/box batch clipping). Reduced ~2500 lines of code, eliminated CuPy type-mixing bugs and C++ auto-build complexity. Architecture skeleton preserved for future re-introduction.
-
 ### ConfigLoader
 
 | Function | Description |
@@ -389,33 +379,6 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 - `refactor:` Code refactoring
 - `test:` Test updates
 - `chore:` Build/CI updates
-
-## Performance
-
-AutoProj supports multiple backends for different performance requirements:
-
-| Backend | Description | Requirements |
-|---------|-------------|--------------|
-| NumPy | CPU-based, Numba JIT acceleration for batch operations | numpy + numba (optional) |
-
-```python
-from autoproj import BackendSelector
-
-# Auto-select (currently always returns NumPyBackend)
-backend = BackendSelector.select()
-print(f"Using backend: {backend.name()}")
-
-# Explicit
-backend = BackendSelector.select('numpy')
-
-# Data-aware selection (currently always returns numpy; future extension point)
-backend = BackendSelector.select(n_points=1_000_000, operation='project_points')
-
-# List available backends
-available = BackendSelector.available_backends()
-```
-
-> **Future extension**: To re-introduce C++/CUDA backends, add `cpp_backend.py` / `cuda_backend.py`, register them in `BackendSelector._backends` dict, and update `_BACKEND_THRESHOLDS` table. The architecture skeleton is preserved for this purpose.
 
 ## License
 

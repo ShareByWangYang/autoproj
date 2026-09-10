@@ -3,8 +3,6 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import Optional, Union, Tuple
 
-from .backends import BackendSelector
-
 
 class Camera(ABC):
     """
@@ -28,7 +26,6 @@ class Camera(ABC):
         max_fov_deg: FOV 上限（度），None 表示无上限。
             仅对鱼眼相机（KannalaBrandtCamera, FThetaCamera）生效。
             针孔相机传入此参数会被忽略并给出 warning。
-        backend: 计算后端（NumPy/CUDA）
     """
 
     # _frustum_scale 的默认值：当未手动指定且自动计算未完成时使用
@@ -44,7 +41,6 @@ class Camera(ABC):
         far_z: float = 1000.0,
         boundary_ratio: float = 0.02,
         max_fov_deg: Optional[float] = None,
-        backend: Optional['Backend'] = None,
         **kwargs
     ):
         # --- 退化输入验证 ---
@@ -71,7 +67,6 @@ class Camera(ABC):
         # FOV 上限（度数），None 表示无上限
         # 仅对鱼眼相机生效，用于限制 _theta_max 的搜索范围
         self._max_fov_rad: Optional[float] = np.radians(max_fov_deg) if max_fov_deg is not None else None
-        self.backend = backend if backend is not None else BackendSelector.select()
         # 子类型标识，由 CameraFactory 创建时设置，用于配置保存时还原类型信息
         self.sub_type: Optional[str] = None
         # 动态视锥缩放因子（由 compute_expansion_factor() 自动计算）
@@ -285,7 +280,6 @@ class PinholeCamera(Camera):
         far_z: 远裁剪面
         boundary_ratio: 边界 margin 占图像最大尺寸的比例（默认0.02）
         max_fov_deg: FOV 上限（度），None 表示无上限。针孔相机忽略此参数。
-        backend: 计算后端（可选）
     """
 
     def __init__(
@@ -301,7 +295,6 @@ class PinholeCamera(Camera):
         far_z: float = 1000.0,
         boundary_ratio: float = 0.02,
         max_fov_deg: Optional[float] = None,
-        backend: Optional['Backend'] = None,
         **kwargs
     ):
         if max_fov_deg is not None:
@@ -314,16 +307,12 @@ class PinholeCamera(Camera):
             near_z=near_z, far_z=far_z,
             boundary_ratio=boundary_ratio,
             max_fov_deg=max_fov_deg,
-            backend=backend,
             **kwargs
         )
         self.fx = fx
         self.fy = fy
 
-        # dist_coeffs 是相机标定参数（数据描述），与 backend 无关，强制使用 NumPy。
-        # 否则当 self.np 是 CuPy 时，dist_coeffs 会变为 CuPy 数组，
-        # 后续 np.testing.assert_array_almost_equal 等接口会触发隐式转换错误，
-        # 且 k1/k2 等切片得到 CuPy 标量，与 CuPy 数组运算时存在冗余拷贝。
+        # dist_coeffs 是相机标定参数（数据描述）。
         if dist_coeffs is None:
             self.dist_coeffs = np.zeros(8, dtype=np.float64)
         else:
@@ -798,19 +787,29 @@ class PinholeCamera(Camera):
             points_cam = xyz
 
         # NumPy 向量化路径 (唯一实现)
-        valid = self._check_depth_range(points_cam)
-
         x_c, y_c, z_c = points_cam[:, 0], points_cam[:, 1], points_cam[:, 2]
         # 使用 safe_z 除法替代 masked assignment（更高效，invalid 点 z≤0
         # 会被 depth check 过滤，x_norm≈0 不影响结果）
         safe_z = np.maximum(z_c, 1e-10)
-        x_norm = (x_c / safe_z).astype(np.float64)
-        y_norm = (y_c / safe_z).astype(np.float64)
+        # 除法已产生 float64，无需额外 astype
+        x_norm = x_c / safe_z
+        y_norm = y_c / safe_z
 
-        # 基于未畸变归一化坐标的 FOV 几何检查
-        # 在畸变之前检查，防止畸变将 FOV 外的点映射回图像内
-        fov_valid = self._check_fov(x_norm, y_norm, tolerance=0.05)
-        valid = valid & fov_valid
+        # 合并深度+FOV检查为单次 logical_and.reduce，减少中间布尔数组分配
+        # （1M 点规模下省 ~3 个 (N,) bool 临时数组 ≈ 3MB）
+        eff_scale = self._frustum_scale if self._frustum_scale is not None else self._DEFAULT_FRUSTUM_SCALE
+        if hasattr(self, '_real_tan_h') and self._real_tan_h is not None:
+            x_max = float(self._real_tan_h) * float(eff_scale)
+            y_max = float(self._real_tan_v) * float(eff_scale)
+        else:
+            x_max = (self.width - self.cx) / self.fx * float(eff_scale)
+            y_max = (self.height - self.cy) / self.fy * float(eff_scale)
+        valid = np.logical_and.reduce([
+            z_c > self.near_z,
+            z_c < self.far_z,
+            np.abs(x_norm) <= x_max,
+            np.abs(y_norm) <= y_max
+        ])
 
         x_dist, y_dist = self._apply_distortion(x_norm, y_norm)
 
@@ -828,13 +827,15 @@ class PinholeCamera(Camera):
 
         if not preserve_extra:
             # 向后兼容：返回 (N, 2) int32
-            result = np.stack([u_clip.astype(np.int32), v_clip.astype(np.int32)], axis=1)
+            # 先 stack 再 astype，减少 1 次 astype 调用（2→1）
+            result = np.stack([u_clip, v_clip], axis=1).astype(np.int32)
             return result, valid
 
         # preserve_extra=True: 返回 (N, 3+) float64
         result = np.zeros((n_points, max(3, original_shape[1])), dtype=np.float64)
-        result[:, 0] = u_clip.astype(np.int32)
-        result[:, 1] = v_clip.astype(np.int32)
+        # np.trunc 替代 astype(int32) 避免 int32 中间临时数组
+        result[:, 0] = np.trunc(u_clip)
+        result[:, 1] = np.trunc(v_clip)
         result[:, 2] = z_c
         if original_shape[1] > 3:
             result[:, 3:] = points_3d[:, 3:]
@@ -859,7 +860,6 @@ class KannalaBrandtCamera(Camera):
         boundary_ratio: 边界 margin 占图像最大尺寸的比例（默认0.02）
         max_fov_deg: FOV 上限（度），None 表示无上限。
             例如 180 = 限制全FOV为180°，超出范围的目标被舍弃。
-        backend: 计算后端（可选）
     """
 
     def __init__(
@@ -878,7 +878,6 @@ class KannalaBrandtCamera(Camera):
         far_z: float = 1000.0,
         boundary_ratio: float = 0.02,
         max_fov_deg: Optional[float] = None,
-        backend: Optional['Backend'] = None,
         **kwargs
     ):
         super().__init__(
@@ -886,7 +885,6 @@ class KannalaBrandtCamera(Camera):
             near_z=near_z, far_z=far_z,
             boundary_ratio=boundary_ratio,
             max_fov_deg=max_fov_deg,
-            backend=backend,
             **kwargs
         )
         self.fx = fx
@@ -919,10 +917,8 @@ class KannalaBrandtCamera(Camera):
         注意：二分法仅在 θ_d 单调递增区间 [0, max_theta] 内有效，
         因此搜索上界约束为 min(theta_limit, max_theta)。
 
-        此方法为几何参数预计算，与 backend 无关，强制使用 NumPy
-        以保证返回值为 Python float（避免 CuPy 0维数组污染 project() 内部运算）。
+        此方法为几何参数预计算，保证返回值为 Python float。
         """
-        import numpy as np  # 局部导入，覆盖 backend.np (CuPy)，确保使用 NumPy
         r_max = max(
             self.cx, self.width - 1 - self.cx,
             self.cy, self.height - 1 - self.cy,
@@ -1246,8 +1242,6 @@ class KannalaBrandtCamera(Camera):
             points_cam = xyz
 
         # NumPy 向量化路径 (唯一实现)
-        valid = self._check_depth_range(points_cam)
-
         x_c, y_c, z_c = points_cam[:, 0], points_cam[:, 1], points_cam[:, 2]
 
         # 使用原始相机坐标计算入射角 θ ∈ [0, π]
@@ -1255,14 +1249,17 @@ class KannalaBrandtCamera(Camera):
         # 复用 r_xy² 避免重复计算 x²+y²
         r_xy_sq = x_c**2 + y_c**2
         # arctan2(r_xy, z) 等价于 arccos(z/r_3d)，但少算一步（无需 clip，
-        # 也无需 r_3d 开方）；深度范围检查已在 _check_depth_range 内完成
+        # 也无需 r_3d 开方）；深度范围检查已在下方合并完成
         theta = np.arctan2(np.sqrt(r_xy_sq), z_c)
 
-        # FOV 检查：θ <= θ_max * eff_scale
+        # 合并深度+FOV检查为单次 logical_and.reduce，减少中间布尔数组分配
         eff_scale = self._frustum_scale if self._frustum_scale is not None else self._DEFAULT_FRUSTUM_SCALE
         theta_limit = float(self._theta_max) * float(eff_scale)
-        fov_valid = theta <= theta_limit
-        valid = valid & fov_valid
+        valid = np.logical_and.reduce([
+            z_c > self.near_z,
+            z_c < self.far_z,
+            theta <= theta_limit
+        ])
 
         # 畸变投影
         k1 = float(self.k1); k2 = float(self.k2)
@@ -1289,12 +1286,14 @@ class KannalaBrandtCamera(Camera):
         v_clip[~valid] = -1
 
         if not preserve_extra:
-            result = np.stack([u_clip.astype(np.int32), v_clip.astype(np.int32)], axis=1)
+            # 先 stack 再 astype，减少 1 次 astype 调用（2→1）
+            result = np.stack([u_clip, v_clip], axis=1).astype(np.int32)
             return result, valid
 
         result = np.zeros((n_points, max(3, original_shape[1])), dtype=np.float64)
-        result[:, 0] = u_clip.astype(np.int32)
-        result[:, 1] = v_clip.astype(np.int32)
+        # np.trunc 替代 astype(int32) 避免 int32 中间临时数组
+        result[:, 0] = np.trunc(u_clip)
+        result[:, 1] = np.trunc(v_clip)
         result[:, 2] = z_c
         if original_shape[1] > 3:
             result[:, 3:] = points_3d[:, 3:]
@@ -1317,7 +1316,6 @@ class FThetaCamera(Camera):
         boundary_ratio: 边界 margin 占图像最大尺寸的比例（默认0.02）
         max_fov_deg: FOV 上限（度），None 表示无上限。
             例如 180 = 限制全FOV为180°，超出范围的目标被舍弃。
-        backend: 计算后端（可选）
     """
 
     def __init__(
@@ -1331,7 +1329,6 @@ class FThetaCamera(Camera):
         far_z: float = 1000.0,
         boundary_ratio: float = 0.02,
         max_fov_deg: Optional[float] = None,
-        backend: Optional['Backend'] = None,
         **kwargs
     ):
         super().__init__(
@@ -1339,12 +1336,9 @@ class FThetaCamera(Camera):
             near_z=near_z, far_z=far_z,
             boundary_ratio=boundary_ratio,
             max_fov_deg=max_fov_deg,
-            backend=backend,
             **kwargs
         )
-        # fw_poly 是相机标定参数（数据描述），与 backend 无关，强制使用 NumPy。
-        # 否则当 self.np 是 CuPy 时，fw_poly 会变为 CuPy 数组，
-        # 后续 np.polynomial.polynomial.polyval 等接口会触发隐式转换错误。
+        # fw_poly 是相机标定参数（数据描述）。
         self.fw_poly = np.array(fw_poly, dtype=np.float64)
         self._theta_max = self._compute_theta_max()
     
@@ -1359,16 +1353,14 @@ class FThetaCamera(Camera):
         当多项式接近线性（fw_poly[0]=0, fw_poly[1]=fx）时，
         θ_max = r_max/fx，但需用 arctan 约束物理合理性。
 
-        此方法为几何参数预计算，与 backend 无关，强制使用 NumPy
-        以保证返回值为 Python float（避免 CuPy 0维数组污染 project() 内部运算）。
+        此方法为几何参数预计算，保证返回值为 Python float。
         """
-        import numpy as np  # 局部导入，覆盖 backend.np (CuPy)，确保使用 NumPy
         r_max = max(self.cx, self.width - self.cx, self.cy, self.height - self.cy)
 
         # 确定搜索上限
         theta_limit = self._max_fov_rad if self._max_fov_rad is not None else np.pi
 
-        # 多项式系数提取为 Python list，避免 backend 标量与 NumPy 运算混合
+        # 多项式系数提取为 Python list
         fw_poly_list = [float(c) for c in self.fw_poly]
 
         def eval_poly(theta):
@@ -1601,14 +1593,17 @@ class FThetaCamera(Camera):
             points_cam = xyz
 
         # NumPy 向量化路径 (唯一实现)
-        valid = self._check_depth_range(points_cam)
-
         x_c, y_c, z_c = points_cam[:, 0], points_cam[:, 1], points_cam[:, 2]
         theta = np.arctan2(np.sqrt(x_c**2 + y_c**2), z_c)
 
-        # 基于角度的 FOV 检查（F-Theta 模型）
-        fov_valid = self._check_fov_theta(theta, tolerance=0.05)
-        valid = valid & fov_valid
+        # 合并深度+FOV检查为单次 logical_and.reduce，减少中间布尔数组分配
+        eff_scale = self._frustum_scale if self._frustum_scale is not None else self._DEFAULT_FRUSTUM_SCALE
+        theta_max = float(self._theta_max) * float(eff_scale)
+        valid = np.logical_and.reduce([
+            z_c > self.near_z,
+            z_c < self.far_z,
+            theta <= theta_max
+        ])
 
         # 使用 Horner 法则计算多项式，比逐项循环快
         fw_poly_list = [float(c) for c in self.fw_poly]
@@ -1627,12 +1622,14 @@ class FThetaCamera(Camera):
         v_clip[~valid] = -1
 
         if not preserve_extra:
-            result = np.stack([u_clip.astype(np.int32), v_clip.astype(np.int32)], axis=1)
+            # 先 stack 再 astype，减少 1 次 astype 调用（2→1）
+            result = np.stack([u_clip, v_clip], axis=1).astype(np.int32)
             return result, valid
 
         result = np.zeros((n_points, max(3, original_shape[1])), dtype=np.float64)
-        result[:, 0] = u_clip.astype(np.int32)
-        result[:, 1] = v_clip.astype(np.int32)
+        # np.trunc 替代 astype(int32) 避免 int32 中间临时数组
+        result[:, 0] = np.trunc(u_clip)
+        result[:, 1] = np.trunc(v_clip)
         result[:, 2] = z_c
         if original_shape[1] > 3:
             result[:, 3:] = points_3d[:, 3:]

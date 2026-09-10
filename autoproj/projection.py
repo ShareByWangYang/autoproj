@@ -1024,26 +1024,26 @@ class Projector:
             List of ((u1, v1), (u2, v2)) 像素坐标对
             裁剪后完全在视锥外的线段返回 None
         """
-        # 统一输入格式为 (N, 2, 3) 数组
+        # 统一输入格式为 (2*n_seg, 3) 数组
         if isinstance(lines_input, LineSet):
             segments = [lines_input.get_segment(i) for i in range(lines_input.num_segments)]
-        elif isinstance(lines_input, list):
-            segments = lines_input
+            all_pts = np.asarray(segments, dtype=np.float64).reshape(-1, 3)
+            n_seg = len(segments)
         else:
-            # ndarray (N, 2, 3)
-            lines_arr = np.asarray(lines_input, dtype=np.float64)
-            segments = [(lines_arr[i, 0], lines_arr[i, 1]) for i in range(lines_arr.shape[0])]
+            # ndarray (N, 2, 3) 或 List[Tuple[ndarray, ndarray]]
+            # 快速路径：np.asarray 在输入已是 float64 ndarray 时零拷贝，
+            # 避免 np.array 的强制复制和 list-of-tuples 往返
+            all_pts = np.asarray(lines_input, dtype=np.float64).reshape(-1, 3)
+            n_seg = all_pts.shape[0] // 2
 
         # 确定裁剪行为
         if cull_frustum is None:
             cull_frustum = self._cull_frustum
 
-        n_seg = len(segments)
         if n_seg == 0:
             return []
 
         # 批量变换所有端点到相机坐标系
-        all_pts = np.array(segments, dtype=np.float64).reshape(-1, 3)  # (2*n_seg, 3)
         if not pts_in_cam and T_to_cam is not None:
             # R @ p.T + t 广播，避免 hstack 齐次数组分配
             _R = T_to_cam[:3, :3]

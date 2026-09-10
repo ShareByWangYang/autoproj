@@ -25,8 +25,9 @@ except ImportError:
     NUMBA_AVAILABLE = False
 
 
-# 阈值: N > 此值时启用 Numba 并行, 否则开销大于收益
-# (基于基准测试: 100 框以下纯 Python 已足够快)
+# 阈值: N > 此值时启用 Numba parallel=True, 否则用 parallel=False
+# (基准: 12 棱时 parallel=True 线程调度 ~22µs > parallel=False ~1.8µs)
+# 小批量走 nopr 版本, 既消除 Python 循环开销又避免线程池调度开销
 BATCH_PARALLEL_THRESHOLD = 32
 
 
@@ -171,6 +172,135 @@ if NUMBA_AVAILABLE:
 
             if not ok:
                 # 无效线段填充 NaN (保持形状一致)
+                clipped[i, 0, 0] = np.nan
+                clipped[i, 0, 1] = np.nan
+                clipped[i, 0, 2] = np.nan
+                clipped[i, 1, 0] = np.nan
+                clipped[i, 1, 1] = np.nan
+                clipped[i, 1, 2] = np.nan
+                valid[i] = False
+
+        return clipped, valid
+
+    # parallel=False 版本: 小批量 (N≤BATCH_PARALLEL_THRESHOLD) 专用
+    # 数学逻辑与 parallel=True 版本完全一致, 仅 prange→range + 无 parallel=True
+    # 避免 Numba 线程池调度开销 (~20µs), 在 12 棱量级比 parallel 快 ~12x
+    @njit(fastmath=True, cache=True)
+    def _clip_lines_pyramid_numba_nopr(
+        p1s, p2s,
+        near_z, tan_h, tan_v
+    ):
+        """Liang-Barsky 批量裁剪 (PYRAMID, 单线程 JIT)
+
+        与 _clip_lines_pyramid_numba 数学完全一致, 仅取消 parallel/prange,
+        供 N≤BATCH_PARALLEL_THRESHOLD 的小批量路径调用 (如单框 project_box)。
+        """
+        N = p1s.shape[0]
+        clipped = np.empty((N, 2, 3), dtype=np.float64)
+        valid = np.zeros(N, dtype=np.bool_)
+
+        for i in range(N):
+            x1 = p1s[i, 0]; y1 = p1s[i, 1]; z1 = p1s[i, 2]
+            x2 = p2s[i, 0]; y2 = p2s[i, 1]; z2 = p2s[i, 2]
+
+            dx = x2 - x1
+            dy = y2 - y1
+            dz = z2 - z1
+
+            t_enter = 0.0
+            t_exit = 1.0
+            ok = True
+
+            num = near_z - z1
+            if dz > 0.0:
+                t = num / dz
+                if t > t_enter:
+                    t_enter = t
+            elif dz < 0.0:
+                t = num / dz
+                if t < t_exit:
+                    t_exit = t
+            else:
+                if num > 0.0:
+                    ok = False
+
+            if ok:
+                num = -(x1 + z1 * tan_h)
+                denom = dx + dz * tan_h
+                if denom > 0.0:
+                    t = num / denom
+                    if t > t_enter:
+                        t_enter = t
+                elif denom < 0.0:
+                    t = num / denom
+                    if t < t_exit:
+                        t_exit = t
+                else:
+                    if num > 0.0:
+                        ok = False
+
+            if ok:
+                num = x1 - z1 * tan_h
+                denom = dz * tan_h - dx
+                if denom > 0.0:
+                    t = num / denom
+                    if t > t_enter:
+                        t_enter = t
+                elif denom < 0.0:
+                    t = num / denom
+                    if t < t_exit:
+                        t_exit = t
+                else:
+                    if num > 0.0:
+                        ok = False
+
+            if ok:
+                num = -(y1 + z1 * tan_v)
+                denom = dy + dz * tan_v
+                if denom > 0.0:
+                    t = num / denom
+                    if t > t_enter:
+                        t_enter = t
+                elif denom < 0.0:
+                    t = num / denom
+                    if t < t_exit:
+                        t_exit = t
+                else:
+                    if num > 0.0:
+                        ok = False
+
+            if ok:
+                num = y1 - z1 * tan_v
+                denom = dz * tan_v - dy
+                if denom > 0.0:
+                    t = num / denom
+                    if t > t_enter:
+                        t_enter = t
+                elif denom < 0.0:
+                    t = num / denom
+                    if t < t_exit:
+                        t_exit = t
+                else:
+                    if num > 0.0:
+                        ok = False
+
+            if ok:
+                if t_enter > t_exit or t_exit < 0.0 or t_enter > 1.0:
+                    ok = False
+                else:
+                    if t_enter < 0.0:
+                        t_enter = 0.0
+                    if t_exit > 1.0:
+                        t_exit = 1.0
+                    clipped[i, 0, 0] = x1 + t_enter * dx
+                    clipped[i, 0, 1] = y1 + t_enter * dy
+                    clipped[i, 0, 2] = z1 + t_enter * dz
+                    clipped[i, 1, 0] = x1 + t_exit * dx
+                    clipped[i, 1, 1] = y1 + t_exit * dy
+                    clipped[i, 1, 2] = z1 + t_exit * dz
+                    valid[i] = True
+
+            if not ok:
                 clipped[i, 0, 0] = np.nan
                 clipped[i, 0, 1] = np.nan
                 clipped[i, 0, 2] = np.nan
@@ -487,9 +617,200 @@ if NUMBA_AVAILABLE:
 
         return clipped, valid
 
+    # parallel=False 版本: 小批量 (N≤BATCH_PARALLEL_THRESHOLD) 专用
+    # 与 _clip_lines_cone_precise_numba 数学完全一致, 仅 prange→range + 无 parallel
+    @njit(fastmath=True, cache=True)
+    def _clip_lines_cone_precise_numba_nopr(
+        p1s, p2s,
+        near_z, cos_theta_max, sin_theta_max, large_fov
+    ):
+        """锥形视锥精确批量裁剪 (单线程 JIT)
+
+        与 _clip_lines_cone_precise_numba 数学完全一致, 仅取消 parallel/prange,
+        供 N≤BATCH_PARALLEL_THRESHOLD 的小批量路径调用。
+        """
+        N = p1s.shape[0]
+        clipped = np.empty((N, 2, 3), dtype=np.float64)
+        valid = np.zeros(N, dtype=np.bool_)
+
+        cos_sq = cos_theta_max * cos_theta_max
+        sin_sq = sin_theta_max * sin_theta_max
+        near_sq = near_z * near_z
+
+        for i in range(N):
+            x1 = p1s[i, 0]; y1 = p1s[i, 1]; z1 = p1s[i, 2]
+            x2 = p2s[i, 0]; y2 = p2s[i, 1]; z2 = p2s[i, 2]
+
+            dx = x2 - x1
+            dy = y2 - y1
+            dz = z2 - z1
+
+            inside1 = _cone_is_inside(x1, y1, z1, near_sq, cos_theta_max,
+                                       cos_sq, sin_sq, large_fov)
+            inside2 = _cone_is_inside(x2, y2, z2, near_sq, cos_theta_max,
+                                       cos_sq, sin_sq, large_fov)
+
+            if inside1 and inside2:
+                clipped[i, 0, 0] = x1; clipped[i, 0, 1] = y1; clipped[i, 0, 2] = z1
+                clipped[i, 1, 0] = x2; clipped[i, 1, 1] = y2; clipped[i, 1, 2] = z2
+                valid[i] = True
+                continue
+
+            cand_t = np.empty(7, dtype=np.float64)
+            cand_x = np.empty(7, dtype=np.float64)
+            cand_y = np.empty(7, dtype=np.float64)
+            cand_z = np.empty(7, dtype=np.float64)
+            n_cand = 0
+
+            if inside1:
+                cand_t[n_cand] = 0.0
+                cand_x[n_cand] = x1; cand_y[n_cand] = y1; cand_z[n_cand] = z1
+                n_cand += 1
+            if inside2:
+                cand_t[n_cand] = 1.0
+                cand_x[n_cand] = x2; cand_y[n_cand] = y2; cand_z[n_cand] = z2
+                n_cand += 1
+
+            a_r = dx * dx + dy * dy + dz * dz
+            if a_r > 1e-12:
+                b_r = 2.0 * (x1 * dx + y1 * dy + z1 * dz)
+                c_r = x1 * x1 + y1 * y1 + z1 * z1 - near_sq
+                disc_r = b_r * b_r - 4.0 * a_r * c_r
+                if disc_r >= 0.0:
+                    sqrt_disc_r = np.sqrt(disc_r)
+                    t1_r = (-b_r - sqrt_disc_r) / (2.0 * a_r)
+                    t2_r = (-b_r + sqrt_disc_r) / (2.0 * a_r)
+                    if 0.0 <= t1_r <= 1.0:
+                        px = x1 + t1_r * dx
+                        py = y1 + t1_r * dy
+                        pz = z1 + t1_r * dz
+                        if _cone_is_inside(px, py, pz, near_sq, cos_theta_max,
+                                            cos_sq, sin_sq, large_fov):
+                            cand_t[n_cand] = t1_r
+                            cand_x[n_cand] = px; cand_y[n_cand] = py; cand_z[n_cand] = pz
+                            n_cand += 1
+                    if 0.0 <= t2_r <= 1.0:
+                        px = x1 + t2_r * dx
+                        py = y1 + t2_r * dy
+                        pz = z1 + t2_r * dz
+                        if _cone_is_inside(px, py, pz, near_sq, cos_theta_max,
+                                            cos_sq, sin_sq, large_fov):
+                            cand_t[n_cand] = t2_r
+                            cand_x[n_cand] = px; cand_y[n_cand] = py; cand_z[n_cand] = pz
+                            n_cand += 1
+
+            a = (dx * dx + dy * dy) * cos_sq - dz * dz * sin_sq
+            b = 2.0 * (x1 * dx + y1 * dy) * cos_sq - 2.0 * z1 * dz * sin_sq
+            c = (x1 * x1 + y1 * y1) * cos_sq - z1 * z1 * sin_sq
+
+            if abs(a) > 1e-12:
+                disc = b * b - 4.0 * a * c
+                if disc >= 0.0:
+                    sqrt_disc = np.sqrt(disc)
+                    t1_c = (-b - sqrt_disc) / (2.0 * a)
+                    t2_c = (-b + sqrt_disc) / (2.0 * a)
+                    if 0.0 <= t1_c <= 1.0:
+                        px = x1 + t1_c * dx
+                        py = y1 + t1_c * dy
+                        pz = z1 + t1_c * dz
+                        if px * px + py * py + pz * pz >= near_sq:
+                            if pz * cos_theta_max >= 0.0:
+                                cand_t[n_cand] = t1_c
+                                cand_x[n_cand] = px; cand_y[n_cand] = py; cand_z[n_cand] = pz
+                                n_cand += 1
+                    if 0.0 <= t2_c <= 1.0:
+                        px = x1 + t2_c * dx
+                        py = y1 + t2_c * dy
+                        pz = z1 + t2_c * dz
+                        if px * px + py * py + pz * pz >= near_sq:
+                            if pz * cos_theta_max >= 0.0:
+                                cand_t[n_cand] = t2_c
+                                cand_x[n_cand] = px; cand_y[n_cand] = py; cand_z[n_cand] = pz
+                                n_cand += 1
+            elif abs(b) > 1e-12:
+                t_c = -c / b
+                if 0.0 <= t_c <= 1.0:
+                    px = x1 + t_c * dx
+                    py = y1 + t_c * dy
+                    pz = z1 + t_c * dz
+                    if px * px + py * py + pz * pz >= near_sq:
+                        if pz * cos_theta_max >= 0.0:
+                            cand_t[n_cand] = t_c
+                            cand_x[n_cand] = px; cand_y[n_cand] = py; cand_z[n_cand] = pz
+                            n_cand += 1
+
+            if abs(dz) > 1e-12:
+                t_z0 = -z1 / dz
+                if 0.0 <= t_z0 <= 1.0:
+                    px = x1 + t_z0 * dx
+                    py = y1 + t_z0 * dy
+                    pz = z1 + t_z0 * dz
+                    if px * px + py * py + pz * pz >= near_sq:
+                        cand_t[n_cand] = t_z0
+                        cand_x[n_cand] = px; cand_y[n_cand] = py; cand_z[n_cand] = pz
+                        n_cand += 1
+
+            if n_cand < 2:
+                clipped[i, 0, 0] = np.nan; clipped[i, 0, 1] = np.nan; clipped[i, 0, 2] = np.nan
+                clipped[i, 1, 0] = np.nan; clipped[i, 1, 1] = np.nan; clipped[i, 1, 2] = np.nan
+                valid[i] = False
+                continue
+
+            for ii in range(n_cand):
+                for jj in range(ii + 1, n_cand):
+                    if cand_t[jj] < cand_t[ii]:
+                        tmp = cand_t[ii]; cand_t[ii] = cand_t[jj]; cand_t[jj] = tmp
+                        tmp = cand_x[ii]; cand_x[ii] = cand_x[jj]; cand_x[jj] = tmp
+                        tmp = cand_y[ii]; cand_y[ii] = cand_y[jj]; cand_y[jj] = tmp
+                        tmp = cand_z[ii]; cand_z[ii] = cand_z[jj]; cand_z[jj] = tmp
+
+            best_length = -1.0
+            best_sx = np.nan; best_sy = np.nan; best_sz = np.nan
+            best_ex = np.nan; best_ey = np.nan; best_ez = np.nan
+            prev_t = cand_t[0]
+            found_valid = False
+
+            for ii in range(1, n_cand):
+                t_start = prev_t
+                t_end = cand_t[ii]
+                if abs(t_end - t_start) <= 1e-9:
+                    prev_t = t_end
+                    continue
+
+                t_mid = 0.5 * (t_start + t_end)
+                px = x1 + t_mid * dx
+                py = y1 + t_mid * dy
+                pz = z1 + t_mid * dz
+                if _cone_is_inside(px, py, pz, near_sq, cos_theta_max,
+                                    cos_sq, sin_sq, large_fov):
+                    length = t_end - t_start
+                    if length > best_length:
+                        best_length = length
+                        best_sx = cand_x[ii - 1]
+                        best_sy = cand_y[ii - 1]
+                        best_sz = cand_z[ii - 1]
+                        best_ex = cand_x[ii]
+                        best_ey = cand_y[ii]
+                        best_ez = cand_z[ii]
+                        found_valid = True
+                prev_t = t_end
+
+            if found_valid:
+                clipped[i, 0, 0] = best_sx; clipped[i, 0, 1] = best_sy; clipped[i, 0, 2] = best_sz
+                clipped[i, 1, 0] = best_ex; clipped[i, 1, 1] = best_ey; clipped[i, 1, 2] = best_ez
+                valid[i] = True
+            else:
+                clipped[i, 0, 0] = np.nan; clipped[i, 0, 1] = np.nan; clipped[i, 0, 2] = np.nan
+                clipped[i, 1, 0] = np.nan; clipped[i, 1, 1] = np.nan; clipped[i, 1, 2] = np.nan
+                valid[i] = False
+
+        return clipped, valid
+
 else:
     # Numba 不可用时的占位 (FrustumCuller 检测后回退到 Python)
     _clip_lines_pyramid_numba = None
+    _clip_lines_pyramid_numba_nopr = None
     _clip_lines_cone_numba = None
     _cone_is_inside = None
     _clip_lines_cone_precise_numba = None
+    _clip_lines_cone_precise_numba_nopr = None

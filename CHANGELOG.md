@@ -6,6 +6,45 @@
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-09-10
+
+### 变更 (Changed)
+
+- **删除 `backends/` 死代码骨架**：v0.x 时代遗留的可插拔后端架构
+  （`Backend`/`NumPyBackend`/`BackendSelector`）完全未参与实际计算路径，
+  `Projector` 与 `Camera` 已直接使用 numpy/numba。删除该目录及全部导出，
+  清理 `__init__.py`/`camera.py`/`tests/`/`README.md` 中的相关引用
+  - `Camera.__init__` 的 `backend` 参数已移除（此前仅赋值给 `self.backend`
+    但从未被读取，是死属性）
+  - 删除 `tests/test_backends.py`（16 项测试），清理
+    `tests/test_batch_operations.py` 中的 `TestBackendSelectorDataAware` 类
+- **`pyproject.toml` classifiers 补全 Python 3.12**：CI 矩阵已测试 3.12，
+  classifiers 此前遗漏
+
+### 性能优化
+
+- **`clip_lines_batch` 三档路径选择**：小批量 (N≤32) 从 Python 逐条循环改为
+  Numba `parallel=False` JIT，消除 Python 循环开销
+  - 新增 `_clip_lines_pyramid_numba_nopr` 和 `_clip_lines_cone_precise_numba_nopr`
+    两个单线程 JIT kernel（数学与 `parallel=True` 版本完全一致，仅取消
+    `prange`/`parallel`，避免线程池调度开销）
+  - 路径选择：N>32 走 `parallel=True`（多线程并行），0<N≤32 走 `parallel=False`
+    （单线程 JIT），有 NaN 或 Numba 不可用走 Python 回退
+  - 效果：单框 `project_box` 从 ~433µs 降至 ~135µs（**3.3x 提速**），
+    64 框单元素循环 vs 批量差距从 4.3x 降至 **1.08x**（基本消除）
+  - 12 棱裁剪：Python 161µs → Numba(nopr) 1.8µs（**89x 提速**）
+- **`project_lines` 输入快速路径**：ndarray 输入走 `np.asarray` 零拷贝路径，
+  list-of-tuples 输入才走 `np.asarray` 转换，120K 线段加速 2.5x
+- **`Camera.project` 检查合并**：1M 点规模下，将 `_check_depth_range` +
+  `_check_fov` 内联合并为单次 `np.logical_and.reduce()`，省 3 个临时 bool 数组
+- **减少 `astype` 调用**：像素坐标转换 `np.stack([u, v]).astype(int32)` 替代
+  两次单独 `astype`，`preserve_extra` 路径用 `np.trunc()` 替代 `astype(int32)`
+
+### 测试
+
+- 117 项 pytest 全通过（删除 16 项 backends 测试，原 133 项）
+- bit-exact 一致性验证：3 相机 × 100 框 × 12 棱 = 3600 边，0 不一致
+
 ## [2.1.1] - 2026-09-09
 
 ### 变更 (Changed)

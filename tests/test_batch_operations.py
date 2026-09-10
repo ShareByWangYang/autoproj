@@ -1,18 +1,16 @@
 """
-批量接口与数据量感知后端选择测试
+批量接口测试
 
 测试覆盖:
 1. project_boxes 与 project_box 单条结果一致性 (3种相机类型)
 2. project_polygons 与 project_polygon 单条结果一致性 (3种相机类型)
 3. FrustumCuller.clip_lines_batch 与 clip_line 单条结果一致性
-4. BackendSelector.select(n_points, operation) 数据量感知选择
-5. 退化输入: 空数组、NaN 值、形状错误
+4. 退化输入: 空数组、NaN 值、形状错误
 """
 import numpy as np
 import pytest
 from autoproj import CameraFactory
 from autoproj.projection import Projector
-from autoproj.backends import BackendSelector
 from autoproj.frustum import FrustumCuller, FrustumType
 from autoproj.geometry import Polygon3D
 
@@ -31,9 +29,7 @@ from autoproj.geometry import Polygon3D
 def projector(request):
     """生成三种相机的 Projector fixture"""
     cam_name, kwargs = request.param
-    # 默认用 numpy 后端, 便于交叉验证 (避免 CuPy/NumPy 类型差异)
-    backend = BackendSelector.select(backend_name='numpy', auto_fallback=False)
-    cam = CameraFactory.create(backend=backend, **kwargs)
+    cam = CameraFactory.create(**kwargs)
     proj = Projector(cam, soft_clip_ratio=0.05)
     return proj, cam_name
 
@@ -272,61 +268,3 @@ class TestProjectPolygons:
         # 每个 polygon 的 vertices 应有对应长度
         for i, r in enumerate(results):
             assert len(r['vertices']) == len(vert_list[i])
-
-
-# ========== TestBackendSelectorDataAware ==========
-class TestBackendSelectorDataAware:
-    """测试数据量感知后端选择
-
-    当前实现: 仅 numpy 可用, 所有 op 始终返回 numpy
-    未来扩展: 重新引入 cuda/cpp 后, 测试需更新为多后端候选判断
-    """
-
-    def setup_method(self):
-        BackendSelector.reset()
-
-    def test_small_points_returns_numpy(self):
-        """小规模点云 (10 点) 当前返回 numpy"""
-        b = BackendSelector.select(n_points=10, operation='project_points')
-        assert b.name() == 'numpy'
-
-    def test_large_points_returns_numpy(self):
-        """1M 点云当前也返回 numpy (未注册 cuda/cpp)"""
-        b = BackendSelector.select(n_points=1_000_000, operation='project_points')
-        assert b.name() == 'numpy'
-
-    def test_box_operation_returns_numpy(self):
-        """project_boxes 任意规模都返回 numpy"""
-        for n in [10, 100, 10000, 1_000_000]:
-            BackendSelector.reset()
-            b = BackendSelector.select(n_points=n, operation='project_boxes')
-            assert b.name() == 'numpy', f'n={n} expected numpy, got {b.name()}'
-
-    def test_explicit_backend_name_overrides_n_points(self):
-        """显式 backend_name 优先于 n_points 数据量感知"""
-        # 显式指定 numpy 应直接返回 numpy (即使 n_points/operation 也传入)
-        b = BackendSelector.select(backend_name='numpy', n_points=10, operation='project_boxes')
-        assert b.name() == 'numpy'
-
-    def test_unknown_operation_uses_default(self):
-        """未知 operation 应使用 default 阈值 (当前仍返回 numpy)"""
-        b = BackendSelector.select(n_points=100, operation='unknown_op')
-        assert b.name() == 'numpy'
-        BackendSelector.reset()
-        b = BackendSelector.select(n_points=100000, operation='unknown_op')
-        assert b.name() == 'numpy'
-
-    def test_selection_cache_hit(self):
-        """重复 (n_points, operation) 应命中缓存"""
-        b1 = BackendSelector.select(n_points=100, operation='project_points')
-        b2 = BackendSelector.select(n_points=100, operation='project_points')
-        assert b1 is b2  # 同一实例 (因 _backends 懒加载)
-
-    def test_reset_clears_cache(self):
-        """reset 应清空缓存和后端实例"""
-        BackendSelector.select(n_points=100, operation='project_points')
-        assert len(BackendSelector._selection_cache) > 0
-        assert BackendSelector._backends['numpy'] is not None
-        BackendSelector.reset()
-        assert len(BackendSelector._selection_cache) == 0
-        assert BackendSelector._backends['numpy'] is None
