@@ -14,6 +14,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.9", "3.10", "3.11", "3.12"]
+        exclude:
+          # ubuntu-latest 新镜像不再提供 Python 3.9，改用 ubuntu-22.04 覆盖
+          - os: ubuntu-latest
+            python-version: "3.9"
+        include:
+          - os: ubuntu-22.04
+            python-version: "3.9"
 
     steps:
       - uses: actions/checkout@v4
