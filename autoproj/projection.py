@@ -490,7 +490,9 @@ class Projector:
         T_to_cam: Optional[np.ndarray] = None,
         pts_in_cam: bool = False,
         cull_frustum: Optional[bool] = None,
-        extend_to_boundary: bool = False
+        extend_to_boundary: bool = False,
+        clip_to_image: bool = False,
+        domain_radius: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         投影 3D 包围盒到图像平面
@@ -510,6 +512,13 @@ class Projector:
             pts_in_cam: 是否已在相机坐标系
             cull_frustum: 覆盖默认裁剪行为
             extend_to_boundary: 是否将裁剪点延长到图像边界（2D视觉优化）
+            clip_to_image: 是否改用 clip_lines_to_image 沿畸变图像矩形
+                精剪 12 条棱（真实边界交点），替代矩形 tan 视锥粗剪。
+                开启后 edges 项附加 'is_clipped_to_image': True 标记；
+                与 extend_to_boundary 互斥（clip_to_image 优先，
+                extend_to_boundary 被忽略）
+            domain_radius: 透传给 clip_lines_to_image 的有效域半径
+                （仅 clip_to_image=True 时生效，仅收紧不放宽）
 
         Returns:
             字典包含：
@@ -522,6 +531,9 @@ class Projector:
                     'draw_pt2': (2,) 实际绘制用端点2（=pt2，便于调用方直接使用）
                     'pt1_is_corner': bool 端点1是否为原始角点
                     'pt2_is_corner': bool 端点2是否为原始角点
+                    'is_clipped_to_image': bool 仅 clip_to_image=True 时存在，恒为 True
+                    'piece_index': int 该棱被拆分为多段时的段序号（clip_to_image=True）
+                    'piece_count': int 该棱的总段数（clip_to_image=True）
                 'box': 原始 Box3D 对象或 None
         """
         if isinstance(box_input, Box3D):
@@ -544,7 +556,8 @@ class Projector:
         return self._project_boxes_core(
             corners[None, :, :], [box_obj],
             T_to_cam=T_to_cam, pts_in_cam=pts_in_cam,
-            cull_frustum=cull_frustum, extend_to_boundary=extend_to_boundary
+            cull_frustum=cull_frustum, extend_to_boundary=extend_to_boundary,
+            clip_to_image=clip_to_image, domain_radius=domain_radius
         )[0]
 
     def project_boxes(
@@ -553,7 +566,9 @@ class Projector:
         T_to_cam: Optional[np.ndarray] = None,
         pts_in_cam: bool = False,
         cull_frustum: Optional[bool] = None,
-        extend_to_boundary: bool = False
+        extend_to_boundary: bool = False,
+        clip_to_image: bool = False,
+        domain_radius: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
         批量投影 3D 包围盒集合到图像平面
@@ -575,6 +590,9 @@ class Projector:
             pts_in_cam: 是否已在相机坐标系
             cull_frustum: 覆盖默认裁剪行为
             extend_to_boundary: 是否将裁剪点延长到图像边界
+            clip_to_image: 是否改用 clip_lines_to_image 沿畸变图像矩形
+                精剪 12 条棱（真实边界交点），替代矩形 tan 视锥粗剪；
+                与 extend_to_boundary 互斥（clip_to_image 优先）
 
         Returns:
             List[Dict], 长度与输入一致, 每项结构与 project_box() 返回值相同
@@ -638,7 +656,8 @@ class Projector:
         return self._project_boxes_core(
             corners_arr, box_objs,
             T_to_cam=T_to_cam, pts_in_cam=pts_in_cam,
-            cull_frustum=cull_frustum, extend_to_boundary=extend_to_boundary
+            cull_frustum=cull_frustum, extend_to_boundary=extend_to_boundary,
+            clip_to_image=clip_to_image, domain_radius=domain_radius
         )
 
     def _project_boxes_core(
@@ -648,7 +667,9 @@ class Projector:
         T_to_cam: Optional[np.ndarray] = None,
         pts_in_cam: bool = False,
         cull_frustum: Optional[bool] = None,
-        extend_to_boundary: bool = False
+        extend_to_boundary: bool = False,
+        clip_to_image: bool = False,
+        domain_radius: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
         框投影向量化核心（单框/批量共享）
@@ -715,10 +736,31 @@ class Projector:
         edge_p1s = corners_cam[:, edge_def[:, 0], :].reshape(total_edges, 3)
         edge_p2s = corners_cam[:, edge_def[:, 1], :].reshape(total_edges, 3)
 
-        # 4) 批量裁剪 (走 clip_lines_batch, 内部自动 Numba 加速)
-        if cull_frustum and self._culler is not None:
+        # 4) 批量裁剪
+        if clip_to_image:
+            # 图像矩形精剪路径: 对原始相机系棱线求与畸变图像矩形的
+            # 真实边界交点（替代矩形 tan 视锥粗剪，修正桶形畸变在
+            # 图像对角线方向的过度裁剪）。独立于 FrustumCuller 结果。
+            edge_lines = np.empty((total_edges, 2, 3), dtype=np.float64)
+            edge_lines[:, 0] = edge_p1s
+            edge_lines[:, 1] = edge_p2s
+            clipped_mp, valid_mp = self.clip_lines_to_image(
+                edge_lines, domain_radius=domain_radius)
+            # clipped_mp: (total_edges, max_pieces, 2, 3)
+            # valid_mp:   (total_edges, max_pieces)
+            # 展平为 (E_flat, 2, 3)，并记录每段所属棱与 piece 序号
+            flat_e, flat_p = np.where(valid_mp)
+            clipped = clipped_mp[flat_e, flat_p]          # (E_flat, 2, 3)
+            edge_valid = np.ones(flat_e.size, dtype=bool)
+            piece_index = flat_p.astype(np.int64)
+            piece_count = valid_mp.sum(axis=1)[flat_e].astype(np.int64)
+            flat_edge_idx = flat_e.astype(np.int64)
+        elif cull_frustum and self._culler is not None:
             clipped, edge_valid = self._culler.clip_lines_batch(edge_p1s, edge_p2s)
             # clipped: (total_edges, 2, 3), edge_valid: (total_edges,)
+            piece_index = np.zeros(total_edges, dtype=np.int64)
+            piece_count = np.ones(total_edges, dtype=np.int64)
+            flat_edge_idx = np.arange(total_edges)
         else:
             # 无裁剪: 直接用原始角点连线，构造"伪裁剪"结果 = 原端点
             clipped = np.empty((total_edges, 2, 3), dtype=np.float64)
@@ -728,16 +770,19 @@ class Projector:
             ev1 = valid_corners[:, edge_def[:, 0]]  # (N, 12)
             ev2 = valid_corners[:, edge_def[:, 1]]  # (N, 12)
             edge_valid = (ev1 & ev2).reshape(total_edges)
+            piece_index = np.zeros(total_edges, dtype=np.int64)
+            piece_count = np.ones(total_edges, dtype=np.int64)
+            flat_edge_idx = np.arange(total_edges)
 
         # 5) 批量投影所有裁剪端点 (一次完成)
         valid_indices = np.where(edge_valid)[0]
         E = len(valid_indices)
 
         # 每条有效边对应的 box 索引 / 边内索引 / 两端角点索引
-        vb = valid_indices // n_edges_per_box       # (E,)
-        ve = valid_indices % n_edges_per_box        # (E,)
-        ci = edge_def[ve, 0]                         # (E,)
-        cj = edge_def[ve, 1]                         # (E,)
+        vb = flat_edge_idx[valid_indices] // n_edges_per_box   # (E,)
+        ve = flat_edge_idx[valid_indices] % n_edges_per_box    # (E,)
+        ci = edge_def[ve, 0]                                   # (E,)
+        cj = edge_def[ve, 1]                                   # (E,)
 
         # 软裁剪参数
         soft_ratio = self._soft_clip_ratio
@@ -762,7 +807,7 @@ class Projector:
             # CONE 类型近似裁剪回退: NaN 标记的边改用 clip_line 精确处理
             needs_precise = np.isnan(clip_pts).any(axis=1).reshape(E, 2).any(axis=1)
             prec_idx = np.where(needs_precise)[0]
-            if self._culler is not None and prec_idx.size > 0:
+            if not clip_to_image and self._culler is not None and prec_idx.size > 0:
                 near_sq = self.camera.near_z ** 2
                 for k in prec_idx:
                     b_k, i_k, j_k = vb[k], ci[k], cj[k]
@@ -797,7 +842,9 @@ class Projector:
                             <= corner_tolerance)
 
             # --- 软裁剪（针孔棱锥对角线偏差修正，向量化）---
-            if (soft_ratio is not None and self._culler is not None and
+            # clip_to_image 路径已是图像矩形精剪（天然对角线正确），无需修正
+            if (soft_ratio is not None and not clip_to_image and
+                    self._culler is not None and
                     self._culler.frustum_type == FrustumType.PYRAMID):
                 orig_p1 = raw_corner_pixels[vb, ci]        # (E,2)
                 orig_p2 = raw_corner_pixels[vb, cj]        # (E,2)
@@ -818,14 +865,13 @@ class Projector:
 
         # 6) 组装每个 box 的结果字典 (与 project_box 返回格式一致)
         results: List[Dict[str, Any]] = []
-        box_edges_dict: List[List[Optional[Dict]]] = [
-            [None] * n_edges_per_box for _ in range(N)
-        ]
+        # 每条棱可能被拆分为多段 → 用列表收集每段 edge dict
+        box_edges: List[List[Dict[str, Any]]] = [[] for _ in range(N)]
         # 仅保留未被精确裁剪丢弃的边
         keep_idx = np.where(keep_mask)[0]
         for k in keep_idx:
-            b, e = int(vb[k]), int(ve[k])
-            box_edges_dict[b][e] = {
+            b = int(vb[k])
+            edge_dict: Dict[str, Any] = {
                 'pt1': p1_px[k],
                 'pt2': p2_px[k],
                 'draw_pt1': p1_px[k],
@@ -833,11 +879,18 @@ class Projector:
                 'pt1_is_corner': bool(p1_is_corner[k]),
                 'pt2_is_corner': bool(p2_is_corner[k]),
             }
+            if clip_to_image:
+                edge_dict['is_clipped_to_image'] = True
+                edge_dict['piece_index'] = int(piece_index[valid_indices[k]])
+                edge_dict['piece_count'] = int(piece_count[valid_indices[k]])
+            box_edges[b].append(edge_dict)
 
         # 7) 组装最终结果
         for b in range(N):
-            edges = [e for e in box_edges_dict[b] if e is not None]
-            if extend_to_boundary and edges:
+            edges = box_edges[b]
+            # clip_to_image 与 extend_to_boundary 互斥：精剪端点已在图像
+            # 矩形上，2D 射线延长无意义，clip_to_image 优先
+            if extend_to_boundary and edges and not clip_to_image:
                 edges = self.extend_edges_to_boundary(
                     edges, self.camera.width, self.camera.height
                 )
@@ -1078,6 +1131,438 @@ class Projector:
                 result[seg_idx] = (all_pixels[seg_idx * 2], all_pixels[seg_idx * 2 + 1])
 
         return result
+
+    def clip_lines_to_image(
+        self,
+        lines_cam: np.ndarray,
+        img_width: Optional[int] = None,
+        img_height: Optional[int] = None,
+        domain_radius: Optional[float] = None,
+        max_pieces: int = 4,
+        return_polyline: bool = False
+    ) -> Union[Tuple[np.ndarray, np.ndarray],
+               Tuple[np.ndarray, np.ndarray, List[List[np.ndarray]]]]:
+        """
+        沿畸变图像矩形裁剪相机系 3D 线段（真实边界交点）
+
+        与 FrustumCuller 的分工：
+            - FrustumCuller.clip_lines_batch：3D 线段 × 矩形 tan 视锥（粗剪），
+              在桶形畸变场景下会在图像对角线方向过度裁剪（结构性偏差）
+            - 本接口：3D 线段 × 畸变后图像矩形边界曲面（精剪），
+              端点为线段与边界曲面的真实交点（亚像素精度）
+
+        算法（纯 NumPy 向量化）：
+            1. 每条线段在 t∈[0,1] 粗采样 16 点，经 _project_raw_pixels 投影
+               并判定 inside：像素 ∈ [0, W-1]×[0, H-1]（含端点），
+               且 z∈(near_z, far_z)、归一化半径 r ≤ r_max
+               （r_max = min(边界逆映射×1.01, 拐点/极点, domain_radius)）
+            2. 检出 inside↔outside 跳变，按连续 inside 段拆分为多个 piece
+               （支持 in-out-in 等多段穿越）；piece 数 > max_pieces 时
+               整条线判 invalid（畸变折叠保守处理）
+            3. 对每个跳变区间向量化像素收敛二分（括号像素跨度 <1e-3px 且
+               参数跨度 <1e-5，上限 30 次），求精边界参数 t*
+            4. 返回每个 piece 两端 3D 点 p1 + t*(p2-p1)
+
+        退化情形（确定行为，不返回 ±inf/巨值像素）：
+            - 端点含 NaN、线段完全在图像外、piece 数超 max_pieces
+              → valid=False，clipped 为 NaN
+            - 线段端点跨 near_z 平面（相机位于几何体内）→ 返回与
+              near_z 平面/图像矩形的真实交点
+            - 鱼眼 θ>90°（z<0）区域保守排除（z>near_z 域门）
+
+        Args:
+            lines_cam: (N, 2, 3) 数组，相机坐标系下的线段端点
+            img_width: 图像宽度，None 取 camera.width
+            img_height: 图像高度，None 取 camera.height
+            domain_radius: 可选有效域半径（归一化坐标
+                r = √(x²+y²)/z 的上限），仅收紧不放宽
+            max_pieces: 单条线段最多保留的可见段数（默认 4）。
+                超过则整条线判 invalid
+            return_polyline: True 时额外返回每条线每个 piece 的 3D 折线点
+                （沿 piece 按 4px 弧长采样，上限 128 点）
+
+        Returns:
+            clipped: (N, max_pieces, 2, 3) float64，每段裁剪后端点（相机系），
+                无效段为 NaN
+            valid: (N, max_pieces) bool，每段是否有效
+            polylines: 仅 return_polyline=True 时返回，List[List[np.ndarray]]，
+                外层长度 N，内层为该线各有效 piece 的 (M_i, 3) 折线点数组
+        """
+        lines = np.asarray(lines_cam, dtype=np.float64)
+        if lines.ndim != 3 or lines.shape[1:] != (2, 3):
+            raise ValueError(
+                f"lines_cam must have shape (N, 2, 3), got {lines.shape}"
+            )
+        if max_pieces < 1:
+            raise ValueError(f"max_pieces must be >= 1, got {max_pieces}")
+        N = lines.shape[0]
+        W = int(img_width) if img_width is not None else self.camera.width
+        H = int(img_height) if img_height is not None else self.camera.height
+
+        clipped = np.full((N, max_pieces, 2, 3), np.nan, dtype=np.float64)
+        valid = np.zeros((N, max_pieces), dtype=bool)
+        if N == 0:
+            if return_polyline:
+                return clipped, valid, []
+            return clipped, valid
+
+        cam = self.camera
+        near_z = float(cam.near_z)
+        far_z = float(cam.far_z)
+
+        # 有效域半径上限（边界逆映射 ×1.01、拐点/极点、domain_radius 三者最小值）
+        r_max = self.effective_r_max(domain_radius)
+
+        p1 = lines[:, 0, :]
+        p2 = lines[:, 1, :]
+        d = p2 - p1
+        endpoint_finite = np.isfinite(p1).all(axis=1) & np.isfinite(p2).all(axis=1)
+
+        n_samples = 16
+        t_grid = np.linspace(0.0, 1.0, n_samples)
+        u_max = float(W - 1)
+        v_max = float(H - 1)
+
+        def _inside(pts: np.ndarray) -> np.ndarray:
+            """(M,3) → (M,) bool：域门 + 图像矩形（含端点）"""
+            px = self._project_raw_pixels(pts)
+            zz = pts[:, 2]
+            dom = (zz > near_z) & (zz < far_z) & np.isfinite(px).all(axis=1)
+            rn = np.hypot(pts[:, 0], pts[:, 1]) / np.maximum(zz, 1e-12)
+            dom &= rn <= r_max
+            return (dom & (px[:, 0] >= 0.0) & (px[:, 0] <= u_max) &
+                    (px[:, 1] >= 0.0) & (px[:, 1] <= v_max))
+
+        # 1) 粗采样判定 inside（分块控制内存峰值）
+        inside = np.zeros((N, n_samples), dtype=bool)
+        chunk = 65536
+        for s in range(0, N, chunk):
+            sl = slice(s, min(s + chunk, N))
+            pts = p1[sl, None, :] + t_grid[None, :, None] * d[sl, None, :]
+            inside[sl] = _inside(pts.reshape(-1, 3)).reshape(-1, n_samples)
+
+        # NaN 端点 → 全 False（invalid）
+        inside &= endpoint_finite[:, None]
+
+        # 2) 跳变检测与拓扑分类（支持多段）
+        chg = inside[:, 1:] != inside[:, :-1]          # (N, S-1)
+        n_chg = chg.sum(axis=1)
+        starts_in = inside[:, 0]
+        # piece 数: starts_in → n_chg//2+1; starts_out → (n_chg+1)//2
+        n_pieces = np.where(starts_in, n_chg // 2 + 1, (n_chg + 1) // 2)
+        # 全在外的线: n_chg=0, starts_out → n_pieces=0
+        overflow = n_pieces > max_pieces
+
+        # 全在内的线段: piece 0 = [0, 1]
+        all_in = n_chg == 0
+        all_in &= starts_in & endpoint_finite
+        clipped[all_in, 0, 0] = p1[all_in]
+        clipped[all_in, 0, 1] = p2[all_in]
+        valid[all_in, 0] = True
+        piece_t = np.full((N, max_pieces, 2), np.nan)
+        piece_t[all_in, 0, 0] = 0.0
+        piece_t[all_in, 0, 1] = 1.0
+
+        # 3) 收集跳变区间，向量化像素收敛二分求精
+        need_bisect = (~all_in) & (n_chg > 0) & (~overflow) & endpoint_finite
+        bi, bj = np.where(chg & need_bisect[:, None])
+        if bi.size > 0:
+            t_lo = t_grid[bj].copy()
+            t_hi = t_grid[bj + 1].copy()
+            st_lo = inside[bi, bj]                       # t_lo 处的 inside 状态
+            q1 = p1[bi]
+            qd = d[bi]
+            # 像素收敛准则: 括号像素跨度 <1e-3px 且 参数跨度 <1e-5（上限 30 次）
+            # t_span 项处理 z 域穿越退化（此时像素跨度恒~0，须靠 t_span 收敛）
+            pts_lo = q1 + t_lo[:, None] * qd
+            pts_hi = q1 + t_hi[:, None] * qd
+            px_lo = self._project_raw_pixels(pts_lo)
+            px_hi = self._project_raw_pixels(pts_hi)
+            for _ in range(30):
+                span = np.hypot(px_lo[:, 0] - px_hi[:, 0],
+                                px_lo[:, 1] - px_hi[:, 1])
+                t_span = t_hi - t_lo
+                if bool(np.all((span < 1e-3) & (t_span < 1e-5))):
+                    break
+                mid = 0.5 * (t_lo + t_hi)
+                mid_pts = q1 + mid[:, None] * qd
+                mid_px = self._project_raw_pixels(mid_pts)
+                # 内联 _inside 域门判定（复用已投影像素，避免重复投影）
+                zz = mid_pts[:, 2]
+                rn = np.hypot(mid_pts[:, 0], mid_pts[:, 1]) / np.maximum(zz, 1e-12)
+                in_mid = ((zz > near_z) & (zz < far_z) &
+                          np.isfinite(mid_px).all(axis=1) & (rn <= r_max) &
+                          (mid_px[:, 0] >= 0.0) & (mid_px[:, 0] <= u_max) &
+                          (mid_px[:, 1] >= 0.0) & (mid_px[:, 1] <= v_max))
+                same = in_mid == st_lo
+                t_lo = np.where(same, mid, t_lo)
+                t_hi = np.where(same, t_hi, mid)
+                px_lo = np.where(same[:, None], mid_px, px_lo)
+                px_hi = np.where(same[:, None], px_hi, mid_px)
+            t_star = 0.5 * (t_lo + t_hi)
+
+            # 按线归集跳变点 t*（同行 bj 升序 → t* 升序）
+            uniq, counts = np.unique(bi, return_counts=True)
+            starts = np.zeros_like(uniq)
+            starts[1:] = np.cumsum(counts)[:-1]
+            max_ch = 2 * max_pieces
+            t_changes = np.full((N, max_ch), np.nan)
+            for k, u in enumerate(uniq):
+                c = int(counts[k])
+                t_changes[u, :c] = t_star[starts[k]:starts[k] + c]
+
+            # 4) 由跳变点组装各 piece 的 [t_lo, t_hi]
+            # 开口端: starts_in 首段 lo=0; 末段 hi 超出跳变数 → 1.0
+            for j in range(max_pieces):
+                if j == 0:
+                    p_lo = np.where(starts_in, 0.0, t_changes[:, 0])
+                    p_hi = np.where(starts_in, t_changes[:, 0], t_changes[:, 1])
+                else:
+                    p_lo = np.where(starts_in,
+                                    t_changes[:, 2 * j - 1],
+                                    t_changes[:, 2 * j])
+                    p_hi = np.where(starts_in,
+                                    t_changes[:, 2 * j],
+                                    t_changes[:, 2 * j + 1])
+                # 末段开口: hi 越界 → 1.0; lo 越界则该 piece 不存在
+                p_hi = np.where(np.isfinite(p_hi), p_hi, 1.0)
+                ok = np.isfinite(p_lo) & need_bisect
+                idx = np.where(ok)[0]
+                if idx.size > 0:
+                    clipped[idx, j, 0] = p1[idx] + p_lo[idx, None] * d[idx]
+                    clipped[idx, j, 1] = p1[idx] + p_hi[idx, None] * d[idx]
+                    piece_t[idx, j, 0] = p_lo[idx]
+                    piece_t[idx, j, 1] = p_hi[idx]
+                    valid[idx, j] = True
+
+        # overflow 线: 全部 piece 置 invalid
+        clipped[overflow] = np.nan
+        valid[overflow] = False
+
+        # 5) 折线点（return_polyline=True）：沿 piece 按 4px 弧长采样
+        polylines: List[List[np.ndarray]] = [[] for _ in range(N)]
+        if return_polyline:
+            poly_arc_px = 4.0       # 弧长采样间距（像素）
+            poly_max_pts = 128      # 单 piece 折线点数上限
+            vi, vj = np.where(valid)
+            if vi.size > 0:
+                ta = piece_t[vi, vj, 0]
+                tb = piece_t[vi, vj, 1]
+                pa = p1[vi] + ta[:, None] * d[vi]
+                pb = p1[vi] + tb[:, None] * d[vi]
+                # 一次性投影所有 piece 端点（像素弧长估计）
+                px_all = self._project_raw_pixels(np.vstack([pa, pb]))
+                M = vi.size
+                seg_px = np.hypot(px_all[M:, 0] - px_all[:M, 0],
+                                  px_all[M:, 1] - px_all[:M, 1])
+                n_pts = np.ceil(seg_px / poly_arc_px).astype(int) + 1
+                n_pts = np.clip(n_pts, 2, poly_max_pts)
+                p1v = p1[vi]
+                dv = d[vi]
+                for k in range(M):
+                    ts = np.linspace(float(ta[k]), float(tb[k]), int(n_pts[k]))
+                    pts_3d = p1v[k][None, :] + ts[:, None] * dv[k][None, :]
+                    polylines[int(vi[k])].append(pts_3d)
+
+        if return_polyline:
+            return clipped, valid, polylines
+        return clipped, valid
+
+    def image_boundary_rmax(self) -> float:
+        """
+        图像矩形边界对应的归一化半径上限（GTSystem 约定）
+
+        取图像四条边上的采样像素，反畸变到归一化坐标，取最大 hypot ×1.01。
+        反畸变采用 OpenCV 式 5 次迭代（与 cv2.undistortPoints 行为一致，
+        已验证对 GTSystem 4 台标定相机复现误差为 0），不引入 cv2 依赖。
+
+        Returns:
+            r_boundary: float，边界归一化半径上限（×1.01 余量）
+        """
+        cam = self.camera
+        W, H = float(cam.width), float(cam.height)
+        n_pts = 96
+        # 四条边采样（四角已包含）
+        us = np.linspace(0.0, W - 1, n_pts)
+        vs = np.linspace(0.0, H - 1, n_pts)
+        edges = np.concatenate([
+            np.stack([us, np.full_like(us, 0.0)], axis=1),
+            np.stack([us, np.full_like(us, H - 1)], axis=1),
+            np.stack([np.full_like(vs, 0.0), vs], axis=1),
+            np.stack([np.full_like(vs, W - 1), vs], axis=1),
+        ])
+        if isinstance(cam, PinholeCamera):
+            xn = (edges[:, 0] - cam.cx) / cam.fx
+            yn = (edges[:, 1] - cam.cy) / cam.fy
+            if cam.has_distortion:
+                k1, k2, k3 = float(cam.k1), float(cam.k2), float(cam.k3)
+                k4, k5, k6 = float(cam.k4), float(cam.k5), float(cam.k6)
+                p1, p2 = float(cam.p1), float(cam.p2)
+                x0, y0 = xn.copy(), yn.copy()
+                x, y = xn.copy(), yn.copy()
+                for _ in range(5):
+                    r2 = x * x + y * y
+                    k_rad = ((1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2) /
+                             (1.0 + k4 * r2 + k5 * r2 * r2 + k6 * r2 * r2 * r2))
+                    xt = 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x)
+                    yt = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y
+                    x = (x0 - xt) / k_rad
+                    y = (y0 - yt) / k_rad
+                r_und = np.hypot(x, y)
+            else:
+                r_und = np.hypot(xn, yn)
+        elif isinstance(cam, (KannalaBrandtCamera, FThetaCamera)):
+            # 鱼眼: r_pixel = hypot(u-cx, v-cy); 反解 θ 使 fw(θ)=r_pixel
+            r_px = np.hypot(edges[:, 0] - cam.cx, edges[:, 1] - cam.cy)
+            fx = float(cam.fx)
+            if isinstance(cam, KannalaBrandtCamera):
+                k1, k2, k3, k4 = (float(cam.k1), float(cam.k2),
+                                  float(cam.k3), float(cam.k4))
+
+                def _theta_d(th):
+                    return (th + k1 * th ** 3 + k2 * th ** 5 +
+                            k3 * th ** 7 + k4 * th ** 9)
+            else:
+                fw = [float(c) for c in cam.fw_poly]
+
+                def _theta_d(th):
+                    return np.polynomial.polynomial.polyval(th, fw)
+
+            theta_hi = float(getattr(cam, '_theta_max', np.pi))
+            # 逐点二分反解 θ（边界采样点数量有限，开销可忽略）
+            r_norm = np.empty_like(r_px)
+            for i, rp in enumerate(r_px):
+                if rp <= 1e-9:
+                    r_norm[i] = 0.0
+                    continue
+                lo, hi = 0.0, theta_hi
+                for _ in range(60):
+                    mid = 0.5 * (lo + hi)
+                    if _theta_d(mid) < rp:
+                        lo = mid
+                    else:
+                        hi = mid
+                th = 0.5 * (lo + hi)
+                # 归一化半径 = tan(θ)，与针孔 r=√(x²+y²)/z 语义对齐
+                r_norm[i] = np.tan(max(th, 0.0))
+            r_und = r_norm
+        else:
+            r_und = np.hypot(
+                (edges[:, 0] - cam.cx) / cam.fx,
+                (edges[:, 1] - cam.cy) / cam.fy)
+        return float(r_und.max()) * 1.01
+
+    def radial_valid_radius(self) -> float:
+        """
+        畸变径向映射的有效域半径（拐点/极点上界）
+
+        返回 d'(r)=0 首次出现（径向映射开始折叠）或分母首次≤0 对应的
+        归一化半径 r。超过该半径后畸变映射非单射，边界交点不唯一。
+        无畸变/未知模型返回 +inf。
+
+        Returns:
+            r_lim: float，有效域半径上限（+inf 表示无折叠）
+        """
+        cam = self.camera
+        grid_n = 2000
+        if isinstance(cam, PinholeCamera):
+            if not cam.has_distortion:
+                return float('inf')
+            k1, k2, k3 = float(cam.k1), float(cam.k2), float(cam.k3)
+            k4, k5, k6 = float(cam.k4), float(cam.k5), float(cam.k6)
+
+            def _d(rr):
+                r2 = rr * rr
+                r4 = r2 * r2
+                r6 = r4 * r2
+                n = 1.0 + k1 * r2 + k2 * r4 + k3 * r6
+                d = 1.0 + k4 * r2 + k5 * r4 + k6 * r6
+                return rr * n / d, n, d
+
+            def _dprime(rr):
+                h = 1e-7
+                dp, _, _ = _d(rr + h)
+                dm, _, _ = _d(rr - h)
+                return (dp - dm) / (2.0 * h)
+
+            # 搜索上界
+            r_hi = 6.0
+            r = np.linspace(0.0, r_hi, grid_n)
+            _, _, den = _d(r)
+
+            # 极点: 分母首次 ≤ 0，二分求精
+            pole_idx = np.where(den <= 0.0)[0]
+            if pole_idx.size:
+                lo_p, hi_p = float(r[pole_idx[0] - 1]), float(r[pole_idx[0]])
+                for _ in range(80):
+                    mid = 0.5 * (lo_p + hi_p)
+                    _, _, de = _d(mid)
+                    if de > 0:
+                        lo_p = mid
+                    else:
+                        hi_p = mid
+                r_pole = 0.5 * (lo_p + hi_p)
+            else:
+                r_pole = r_hi
+
+            # 拐点: 在 [0, r_pole) 内 d'(r) 首次 ≤ 0（径向映射折叠）
+            r_turn = r_pole
+            if r_pole > 1e-6:
+                rs = np.linspace(0.0, r_pole * 0.9999, grid_n)
+                dpv = np.array([_dprime(x) for x in rs])
+                ti = np.where(dpv <= 0.0)[0]
+                if ti.size:
+                    lo_t, hi_t = float(rs[ti[0] - 1]), float(rs[ti[0]])
+                    for _ in range(80):
+                        mid = 0.5 * (lo_t + hi_t)
+                        if _dprime(mid) > 0:
+                            lo_t = mid
+                        else:
+                            hi_t = mid
+                    r_turn = 0.5 * (lo_t + hi_t)
+
+            return float(min(r_pole, r_turn))
+        elif isinstance(cam, KannalaBrandtCamera):
+            # KB: θ_d(θ) 单调则无折叠；检查 θ ∈ [0, θ_max]
+            theta_hi = float(getattr(cam, '_theta_max', np.pi / 2))
+            th = np.linspace(0.0, min(theta_hi, np.pi * 0.999), grid_n)
+            dd = (th + float(cam.k1) * th ** 3 + float(cam.k2) * th ** 5 +
+                  float(cam.k3) * th ** 7 + float(cam.k4) * th ** 9)
+            turn_idx = np.where(np.diff(dd) <= 0.0)[0]
+            if turn_idx.size:
+                return float(np.tan(th[turn_idx[0]]))
+            return float('inf')
+        elif isinstance(cam, FThetaCamera):
+            theta_hi = float(getattr(cam, '_theta_max', np.pi / 2))
+            th = np.linspace(0.0, min(theta_hi, np.pi * 0.999), grid_n)
+            fw = [float(c) for c in cam.fw_poly]
+            dd = np.polynomial.polynomial.polyval(th, fw)
+            turn_idx = np.where(np.diff(dd) <= 0.0)[0]
+            if turn_idx.size:
+                return float(np.tan(th[turn_idx[0]]))
+            return float('inf')
+        return float('inf')
+
+    def effective_r_max(self, domain_radius: Optional[float] = None) -> float:
+        """
+        最终采用的归一化半径上限
+
+        r_max = min(image_boundary_rmax(), radial_valid_radius(), domain_radius)
+
+        用于 _inside() 的域门：归一化半径 r=√(x²+y²)/z 超过 r_max 的点
+        视为不可见（折叠区或图像外），避免畸变回折产生假交点。
+
+        Args:
+            domain_radius: 调用方提供的额外收紧半径（仅收紧，不放宽）
+
+        Returns:
+            r_max: float，最终有效域半径上限
+        """
+        r = self.image_boundary_rmax()
+        r = min(r, self.radial_valid_radius())
+        if domain_radius is not None:
+            r = min(r, float(domain_radius))
+        return r
 
     def project_polygon(
         self,

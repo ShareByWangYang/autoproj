@@ -6,6 +6,64 @@
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-28
+
+### 新增 (Added)
+
+- **3D 线段裁剪到畸变图像矩形**：新增 `Projector.clip_lines_to_image()`
+  公开接口，将相机坐标下的线段按畸变图像边界精确裁剪为可见子段
+  - 边界半径 `image_boundary_rmax()`：采样图像四边（每边 96 点），
+    采用与 OpenCV 兼容的 5 次迭代反畸变（纯 NumPy 实现，不引入 cv2），
+    取最大归一化半径 ×1.01 作为图像边界半径
+  - 径向有效半径 `radial_valid_radius()`：对有理畸变模型求极点
+    （分母首次归零，二分求精）与拐点（`d'(r) ≤ 0` 首次出现），取二者较小值
+  - `effective_r_max(domain_radius)`：取边界半径、径向有效半径与调用方
+    指定 `domain_radius` 三者的最小值
+  - 新增 `domain_radius` 参数，贯通 `project_box` / `project_boxes` /
+    `clip_lines_to_image`
+- **多段输出**：`clip_lines_to_image` 返回形状由 `(N, 2, 3)` 改为
+  `(N, max_pieces, 2, 3)`，配套有效掩码 `(N, max_pieces)`；
+  `max_pieces=4`（默认），进-出-进型线段可正确输出 2 段；
+  段数超过 `max_pieces` 时整条线段判为无效
+- **折线采样**：`return_polyline=True` 时额外返回
+  `List[List[(M, 3)]]`，按 4px 弧长采样，单段上限 128 点
+- **桥接多段输出**：`project_box` / `project_boxes` 的边字典新增
+  `piece_index` / `piece_count` 字段，同一棱的多段裁剪结果按序追加
+
+### 变更 (Changed)
+
+- **标志重命名**：`clipped_to_image` → `is_clipped_to_image`，
+  避免与 `clip_to_image` 参数语义混淆
+- **删除 `_radial_distortion_monotonic()`**：该全局单调守卫是强畸变
+  场景下整批空返回的根因（GTSystem 实测 135 例残留），改由
+  `effective_r_max()` 精确刻画有效径向范围
+
+### 修复 (Fixed)
+
+- **强畸变相机裁剪整批失效**：图像边界半径改用 OpenCV 兼容反解，
+  修正代数反解导致的 0.13~0.62 半径偏差
+- **长棱裁剪精度不足**：二分收敛准则由固定 12 次迭代改为像素空间收敛
+  （像素跨度 <1e-3px 且参数跨度 <1e-5，上限 30 次），20m 长棱
+  （z=2m、fx≈2435）误差由 ~5.94px 降至 ≤0.5px
+- **z 域穿越退化**：`near_z` 平面穿越处两端点投影像素重合，像素跨度
+  恒为 ~0，补齐 `t_span` 收敛项避免零次迭代即退出
+
+### 测试
+
+- 重写 `tests/test_clip_to_image.py`（39 项）：适配多段输出形状、
+  删除单调守卫相关用例、新增 4 台 GTSystem 相机 `r_max` 复现
+  （误差 <1e-3）、多段裁剪、折线采样、长棱收敛精度用例
+
+### 性能
+
+- 32.5 万线段 `clip_lines_to_image`（默认）：**0.88s**
+- 32.5 万线段 `clip_lines_to_image`（含折线）：**1.52s**
+- 1 万包围盒 `project_boxes(clip_to_image=False)`：**0.27s**
+  （与 v2.1.2 持平，无回归）
+- 1 万包围盒 `project_boxes(clip_to_image=True)`：**1.02s**
+  （新增能力，v2.1.2 无畸变图像矩形裁剪路径）
+- 折线端点投影由逐段调用改为单批向量化，含折线路径 4.3s → 1.5s
+
 ## [2.1.2] - 2026-09-10
 
 ### 变更 (Changed)
