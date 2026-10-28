@@ -498,3 +498,71 @@ class TestProjectBoxBridge:
         res = pinhole_clean.project_box(box, pts_in_cam=True,
                                         clip_to_image=True)
         assert len(res['edges']) == 0
+
+
+# ========== 11. 窄可见窗口加密复扫（A2） ==========
+class TestNarrowWindowRescan:
+    def test_narrow_window_detected(self, pinhole_clean):
+        """16 点粗扫全 outside 但真实存在窄可见窗口 → 复扫应找回
+
+        z=5、x 从 -100→100 时，图像矩形对应的 t 窗口约 [0.476, 0.524]
+        （宽 0.048 < 1/15 ≈ 0.067），16 点采样恰好全部落在窗口外。
+        """
+        a = np.array([-100.0, -10.0, 5.0])
+        b = np.array([100.0, 10.0, 5.0])
+        # 粗扫确认：16 点全 outside
+        t16 = np.linspace(0.0, 1.0, 16)
+        px = _px(pinhole_clean, a[None, :] + t16[:, None] * (b - a)[None, :])
+        assert not np.any((px[:, 0] >= 0) & (px[:, 0] <= U_MAX) &
+                          (px[:, 1] >= 0) & (px[:, 1] <= V_MAX))
+
+        clipped, valid = pinhole_clean.clip_lines_to_image(np.array([[a, b]]))
+        assert valid.sum() == 1
+        t_lo = (clipped[0, 0, 0, 0] - a[0]) / (b[0] - a[0])
+        t_hi = (clipped[0, 0, 1, 0] - a[0]) / (b[0] - a[0])
+        assert 0.47 < t_lo < 0.48
+        assert 0.52 < t_hi < 0.53
+
+    def test_far_line_still_invalid(self, pinhole_clean):
+        """远离图像的线段不应因复扫被判可见"""
+        far = np.array([[[500.0, 500.0, 5.0], [600.0, 600.0, 5.0]]])
+        _, valid = pinhole_clean.clip_lines_to_image(far)
+        assert valid.sum() == 0
+
+
+# ========== 12. 半径缓存（A1） ==========
+class TestRadiusCache:
+    def test_radial_radius_computed_once(self, pinhole_barrel, monkeypatch):
+        """重复调用命中缓存，内部实现只执行一次"""
+        calls = {'n': 0}
+        orig = Projector._radial_valid_radius_impl
+
+        def counted(self):
+            calls['n'] += 1
+            return orig(self)
+
+        monkeypatch.setattr(Projector, '_radial_valid_radius_impl', counted)
+        pinhole_barrel.radial_valid_radius()
+        pinhole_barrel.radial_valid_radius()
+        pinhole_barrel.effective_r_max()
+        assert calls['n'] == 1
+
+    def test_boundary_rmax_computed_once(self, pinhole_barrel, monkeypatch):
+        calls = {'n': 0}
+        orig = Projector._image_boundary_rmax_impl
+
+        def counted(self):
+            calls['n'] += 1
+            return orig(self)
+
+        monkeypatch.setattr(Projector, '_image_boundary_rmax_impl', counted)
+        pinhole_barrel.image_boundary_rmax()
+        pinhole_barrel.image_boundary_rmax()
+        assert calls['n'] == 1
+
+    def test_cache_invalidated_on_calibration_change(self, pinhole_barrel):
+        """标定参数变更后缓存失效，不返回过期半径"""
+        r_before = pinhole_barrel.radial_valid_radius()
+        pinhole_barrel.camera.k1 = -0.05
+        r_after = pinhole_barrel.radial_valid_radius()
+        assert r_after != r_before

@@ -99,6 +99,34 @@ class Projector:
         else:
             self._culler = None
 
+        # 半径结果缓存: key = 相机标定参数签名, value = 半径值
+        # image_boundary_rmax() / radial_valid_radius() 均为标定的纯函数，
+        # 重复调用（如逐目标裁剪）不应重复计算（单次约 5 ms）
+        self._radius_cache: Dict[tuple, float] = {}
+
+    def _radius_cache_key(self) -> tuple:
+        """
+        相机标定参数签名（缓存 key）
+
+        覆盖影响半径计算的全部字段：分辨率、主点、焦距、畸变系数。
+        标定参数被修改后 key 自动变化，不会返回过期缓存值。
+
+        Returns:
+            tuple: 可哈希的标定参数签名
+        """
+        cam = self.camera
+        parts: List[Any] = [type(cam).__name__, int(cam.width), int(cam.height),
+                            float(cam.cx), float(cam.cy)]
+        for name in ('fx', 'fy', 'k1', 'k2', 'k3', 'k4'):
+            val = getattr(cam, name, None)
+            if val is not None:
+                parts.append(float(val))
+        for name in ('dist_coeffs', 'fw_poly'):
+            val = getattr(cam, name, None)
+            if val is not None:
+                parts.append(np.asarray(val, dtype=np.float64).ravel().tobytes())
+        return tuple(parts)
+
     def _compute_effective_expansion(self, scale: Optional[float]) -> float:
         """
         计算有效视锥缩放因子
@@ -1139,7 +1167,9 @@ class Projector:
         img_height: Optional[int] = None,
         domain_radius: Optional[float] = None,
         max_pieces: int = 4,
-        return_polyline: bool = False
+        return_polyline: bool = False,
+        _n_samples: int = 16,
+        _rescan: bool = True
     ) -> Union[Tuple[np.ndarray, np.ndarray],
                Tuple[np.ndarray, np.ndarray, List[List[np.ndarray]]]]:
         """
@@ -1162,6 +1192,9 @@ class Projector:
             3. 对每个跳变区间向量化像素收敛二分（括号像素跨度 <1e-3px 且
                参数跨度 <1e-5，上限 30 次），求精边界参数 t*
             4. 返回每个 piece 两端 3D 点 p1 + t*(p2-p1)
+            5. 加密复扫：粗扫判定为「整条 outside」的线段，若其像素包围盒
+               （端点 + 中点）接近图像矩形，则用 64 点重扫，找回被 16 点
+               采样漏掉的窄可见窗口（窗口宽度下限由 1/15 降至 1/63）
 
         退化情形（确定行为，不返回 ±inf/巨值像素）：
             - 端点含 NaN、线段完全在图像外、piece 数超 max_pieces
@@ -1218,7 +1251,7 @@ class Projector:
         d = p2 - p1
         endpoint_finite = np.isfinite(p1).all(axis=1) & np.isfinite(p2).all(axis=1)
 
-        n_samples = 16
+        n_samples = _n_samples
         t_grid = np.linspace(0.0, 1.0, n_samples)
         u_max = float(W - 1)
         v_max = float(H - 1)
@@ -1364,6 +1397,35 @@ class Projector:
                     pts_3d = p1v[k][None, :] + ts[:, None] * dv[k][None, :]
                     polylines[int(vi[k])].append(pts_3d)
 
+        # 6) 加密复扫：粗扫全判 outside 的线可能漏掉窄可见窗口
+        #    仅对「像素包围盒接近图像矩形」的候选线用 128 点重扫，
+        #    避免对真正远离图像的线段（大批量中占多数）付出额外成本
+        if _rescan and N > 0:
+            none_valid = (~valid.any(axis=1)) & (~overflow) & endpoint_finite
+            cand = np.flatnonzero(none_valid)
+            if cand.size > 0:
+                q1c, q2c = p1[cand], p2[cand]
+                pxc = self._project_raw_pixels(
+                    np.vstack([q1c, q2c, 0.5 * (q1c + q2c)])).reshape(3, cand.size, 2)
+                margin = 0.05 * max(u_max, v_max)
+                # NaN（如 z<=0 处）按 0 处理，使判据偏保守（倾向重扫）
+                xs = np.where(np.isfinite(pxc[:, :, 0]), pxc[:, :, 0], 0.0)
+                ys = np.where(np.isfinite(pxc[:, :, 1]), pxc[:, :, 1], 0.0)
+                near = ((xs.max(axis=0) >= -margin) & (xs.min(axis=0) <= u_max + margin) &
+                        (ys.max(axis=0) >= -margin) & (ys.min(axis=0) <= v_max + margin))
+                cand = cand[near]
+            if cand.size > 0:
+                res2 = self.clip_lines_to_image(
+                    lines[cand], img_width=W, img_height=H,
+                    domain_radius=domain_radius, max_pieces=max_pieces,
+                    return_polyline=return_polyline,
+                    _n_samples=64, _rescan=False)
+                clipped[cand] = res2[0]
+                valid[cand] = res2[1]
+                if return_polyline:
+                    for pos, orig in enumerate(cand):
+                        polylines[orig] = res2[2][pos]
+
         if return_polyline:
             return clipped, valid, polylines
         return clipped, valid
@@ -1376,9 +1438,26 @@ class Projector:
         反畸变采用 OpenCV 式 5 次迭代（与 cv2.undistortPoints 行为一致，
         已验证对 GTSystem 4 台标定相机复现误差为 0），不引入 cv2 依赖。
 
+        .. warning::
+           本方法**只**反映图像边界，**不含**极点/拐点约束。强畸变相机下
+           该值可能远大于径向映射的有效域（GTSystem 2m-B 标定为 1.693，
+           而有效上限仅 0.965）。可见性判定请使用 :meth:`effective_r_max`，
+           不要用本方法的返回值作为域门上限。
+
+        结果按相机标定参数缓存，标定变更后自动失效。
+
         Returns:
             r_boundary: float，边界归一化半径上限（×1.01 余量）
         """
+        key = (0,) + self._radius_cache_key()
+        cached = self._radius_cache.get(key)
+        if cached is not None:
+            return cached
+        val = self._image_boundary_rmax_impl()
+        self._radius_cache[key] = val
+        return val
+
+    def _image_boundary_rmax_impl(self) -> float:
         cam = self.camera
         W, H = float(cam.width), float(cam.height)
         n_pts = 96
@@ -1460,9 +1539,20 @@ class Projector:
         归一化半径 r。超过该半径后畸变映射非单射，边界交点不唯一。
         无畸变/未知模型返回 +inf。
 
+        结果按相机标定参数缓存，标定变更后自动失效。
+
         Returns:
             r_lim: float，有效域半径上限（+inf 表示无折叠）
         """
+        key = (1,) + self._radius_cache_key()
+        cached = self._radius_cache.get(key)
+        if cached is not None:
+            return cached
+        val = self._radial_valid_radius_impl()
+        self._radius_cache[key] = val
+        return val
+
+    def _radial_valid_radius_impl(self) -> float:
         cam = self.camera
         grid_n = 2000
         if isinstance(cam, PinholeCamera):

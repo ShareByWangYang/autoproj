@@ -6,7 +6,7 @@ from .frustum import FrustumCuller, FrustumType
 from .config import ConfigLoader, load_camera, load_camera_from_dict, save_camera_config
 from . import conventions
 
-__version__ = '2.2.0'
+__version__ = '2.2.1'
 __all__ = [
     'Camera',
     'PinholeCamera',
